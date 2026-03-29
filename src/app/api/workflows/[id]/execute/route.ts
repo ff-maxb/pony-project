@@ -24,6 +24,10 @@ export async function POST(
       return errorResponse("Workflow is paused", 400);
     }
 
+    if (!process.env.INNGEST_EVENT_KEY) {
+      return errorResponse("INNGEST_EVENT_KEY is not configured", 503);
+    }
+
     // Get latest version
     const { data: version } = await db
       .from("workflow_versions")
@@ -58,17 +62,25 @@ export async function POST(
       .single();
     if (error || !execution) return errorResponse(error?.message ?? "Failed to create execution", 500);
 
-    // Send Inngest event
-    await inngest.send({
-      name: "workflow/execution.requested",
-      data: {
-        workflowId,
-        versionId: version.id,
-        executionId: execution.id,
-        teamId: workflow.team_id,
-        triggerData,
-      },
-    });
+    try {
+      await inngest.send({
+        name: "workflow/execution.requested",
+        data: {
+          workflowId,
+          versionId: version.id,
+          executionId: execution.id,
+          teamId: workflow.team_id,
+          triggerData,
+        },
+      });
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      await db
+        .from("workflow_executions")
+        .update({ status: "failed", completed_at: new Date().toISOString(), error: errorMsg })
+        .eq("id", execution.id);
+      throw err;
+    }
 
     return jsonResponse({ executionId: execution.id }, 201);
   } catch (err) {

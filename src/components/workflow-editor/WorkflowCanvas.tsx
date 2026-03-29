@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
+import Nango from "@nangohq/frontend";
+import { toast } from "sonner";
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -17,23 +19,42 @@ import {
 import "@xyflow/react/dist/style.css";
 import type { Workflow } from "@inngest/workflow-kit";
 import { actionsDefinition } from "@/inngest/actions-definition";
+import { AVAILABLE_INTEGRATIONS } from "@/types/workflow";
 import TriggerNode from "./nodes/TriggerNode";
 import ActionNode from "./nodes/ActionNode";
+import LinearNode from "./nodes/LinearNode";
+import CalendlyNode from "./nodes/CalendlyNode";
 import LogicNode from "./nodes/LogicNode";
+import DelayPanel from "./panels/DelayPanel";
+import ConditionPanel from "./panels/ConditionPanel";
+import SetVariablePanel from "./panels/SetVariablePanel";
 
-const LOGIC_KINDS = new Set(["builtin:if", "logic_delay"]);
+const LOGIC_KINDS = new Set(["builtin:if", "logic_delay", "logic_set_variables"]);
 
-const nodeTypes = { trigger: TriggerNode, action: ActionNode, logic: LogicNode };
+const nodeTypes = {
+  trigger: TriggerNode,
+  action: ActionNode,
+  logic: LogicNode,
+  linear: LinearNode,
+  calendly: CalendlyNode,
+};
 
 function toReactFlow(workflow: Workflow): { nodes: Node[]; edges: Edge[] } {
+  const positions = (workflow.metadata?.positions ?? {}) as Record<string, { x: number; y: number }>;
   const nodes: Node[] = [
-    { id: "trigger", type: "trigger", position: { x: 250, y: 50 }, data: {} },
+    { id: "trigger", type: "trigger", position: positions["trigger"] ?? { x: 250, y: 50 }, data: {} },
   ];
   workflow.actions.forEach((action, i) => {
     nodes.push({
       id: action.id,
-      type: LOGIC_KINDS.has(action.kind) ? "logic" : "action",
-      position: { x: 250, y: 180 + i * 140 },
+      type: LOGIC_KINDS.has(action.kind)
+        ? "logic"
+        : LINEAR_KINDS.has(action.kind)
+          ? "linear"
+          : CALENDLY_KINDS.has(action.kind)
+            ? "calendly"
+            : "action",
+      position: positions[action.id] ?? { x: 250, y: 180 + i * 140 },
       data: { kind: action.kind, name: action.name ?? action.kind, inputs: action.inputs ?? {} },
     });
   });
@@ -55,7 +76,10 @@ function toReactFlow(workflow: Workflow): { nodes: Node[]; edges: Edge[] } {
 
 function toInngestFormat(nodes: Node[], edges: Edge[]): Workflow {
   const actions = nodes
-    .filter((n) => n.type === "action" || n.type === "logic")
+    .filter(
+      (n) =>
+        n.type === "action" || n.type === "logic" || n.type === "linear" || n.type === "calendly"
+    )
     .map((n) => ({
       id: n.id,
       kind: n.data.kind as string,
@@ -74,11 +98,45 @@ function toInngestFormat(nodes: Node[], edges: Edge[]): Workflow {
     }
     return { from, to: e.target };
   });
-  return { actions, edges: inngestEdges };
+  const positions: Record<string, { x: number; y: number }> = {};
+  for (const n of nodes) positions[n.id] = n.position;
+  return { actions, edges: inngestEdges, metadata: { positions } };
+}
+
+const LINEAR_KINDS = new Set(["linear_create_issue", "linear_update_issue"]);
+const CALENDLY_KINDS = new Set(["calendly_create_scheduling_link"]);
+const INTEGRATION_ACTIONS_BY_KIND = new Map(
+  AVAILABLE_INTEGRATIONS.flatMap((integration) =>
+    integration.actions.map((action) => [action.kind, integration.actions] as const)
+  )
+);
+const DEFAULT_WORKFLOW_VARIABLES = ["name", "email", "phone"];
+
+function parseVariablesObject(value: unknown): Record<string, unknown> {
+  if (!value) return {};
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== "string") return {};
+
+  const raw = value.trim();
+  if (!raw) return {};
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return {};
+  }
+
+  return {};
 }
 
 interface WorkflowCanvasProps {
   workflowId: string;
+  teamId?: string;
   initialDefinition?: Workflow;
   onSave: (workflow: Workflow) => Promise<void>;
   onRegisterSave?: (fn: () => Promise<void>) => void;
@@ -131,6 +189,7 @@ const PALETTE_GROUPS: PaletteGroup[] = [
     items: [
       { kind: "builtin:if", icon: "⑂", label: "If / Condition", description: "Branch based on a condition" },
       { kind: "logic_delay", icon: "⏱", label: "Delay", description: "Wait a duration before continuing" },
+      { kind: "logic_set_variables", icon: "𝑥", label: "Set Variables", description: "Set reusable variables for later steps" },
       { icon: "⑃", label: "Split", description: "Run multiple branches in parallel", comingSoon: true },
     ],
   },
@@ -172,12 +231,13 @@ const PALETTE_GROUPS: PaletteGroup[] = [
       { kind: "slack_send_message", icon: "💬", label: "Slack: Send Message", description: "Send a message to a Slack channel" },
       { kind: "gmail_send_email", icon: "📧", label: "Gmail: Send Email", description: "Send an email via Gmail" },
       { kind: "google_sheets_append_row", icon: "📊", label: "Sheets: Append Row", description: "Append a row to a Google Sheet" },
-      { icon: "📋", label: "Linear: Create Issue", description: "Create an issue in Linear", comingSoon: true },
+      { kind: "linear_create_issue", icon: "◈", label: "Linear", description: "Create and manage Linear issues" },
+      { kind: "calendly_create_scheduling_link", icon: "📅", label: "Calendly", description: "Generate one-off scheduling links" },
     ],
   },
 ];
 
-function Canvas({ workflowId, initialDefinition, onSave, onRegisterSave, status }: WorkflowCanvasProps) {
+function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave, status }: WorkflowCanvasProps) {
   const { nodes: initNodes, edges: initEdges } = toReactFlow(
     initialDefinition ?? { actions: [], edges: [] }
   );
@@ -190,10 +250,18 @@ function Canvas({ workflowId, initialDefinition, onSave, onRegisterSave, status 
   const handleSaveRef = useRef<() => Promise<void>>(() => Promise.resolve());
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState(false);
+  const [playing, setPlaying] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [linearConnected, setLinearConnected] = useState<boolean | null>(null);
+  const [connectingLinear, setConnectingLinear] = useState(false);
+  const [linearTeams, setLinearTeams] = useState<Array<{ id: string; name: string; key: string }>>([]);
+  const [calendlyConnected, setCalendlyConnected] = useState<boolean | null>(null);
+  const [connectingCalendly, setConnectingCalendly] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; data?: unknown; error?: string } | null>(null);
+  const [focusedInputKey, setFocusedInputKey] = useState<string | null>(null);
   const idCounter = useRef(Date.now());
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, fitView, setCenter } = useReactFlow();
   const canvasRef = useRef<HTMLDivElement>(null);
 
   // Custom drag state
@@ -204,7 +272,10 @@ function Canvas({ workflowId, initialDefinition, onSave, onRegisterSave, status 
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
   const selectedAction =
-    selectedNode?.type === "action" || selectedNode?.type === "logic"
+    selectedNode?.type === "action" ||
+    selectedNode?.type === "logic" ||
+    selectedNode?.type === "linear" ||
+    selectedNode?.type === "calendly"
       ? actionsDefinition.find((a) => a.kind === (selectedNode.data.kind as string))
       : null;
 
@@ -219,6 +290,44 @@ function Canvas({ workflowId, initialDefinition, onSave, onRegisterSave, status 
   const panelNode = panelSnapshotRef.current.node;
   const panelAction = panelSnapshotRef.current.action;
   const panelOpen = !!(selectedNode && selectedAction);
+  const panelIntegrationActions = panelNode
+    ? INTEGRATION_ACTIONS_BY_KIND.get(panelNode.data.kind as string) ?? []
+    : [];
+  const variableSuggestions = [
+    { label: "Trigger value", token: "{{event.data.field}}" },
+    { label: "Trigger raw payload", token: "{{event.data}}" },
+    { label: "Workflow variable", token: "{{vars.name}}" },
+    { label: "Workflow variable", token: "{{vars.email}}" },
+    { label: "Workflow variable", token: "{{vars.phone}}" },
+    { label: "Workflow variable", token: "{{variables.name}}" },
+    { label: "Ref syntax", token: "!ref($.event.data.field)" },
+    ...nodes
+      .filter(
+        (n) =>
+          n.id !== panelNode?.id &&
+          (n.type === "action" || n.type === "logic" || n.type === "linear" || n.type === "calendly")
+      )
+      .slice(0, 3)
+      .map((n) => ({
+        label: `${(n.data.name as string) || n.id}`,
+        token: `{{steps.${n.id}}}`,
+      })),
+  ];
+  const knownVariableNames = Array.from(
+    new Set(
+      [
+        ...DEFAULT_WORKFLOW_VARIABLES,
+        ...nodes
+        .filter((n) => n.type === "logic" && n.data.kind === "logic_set_variables")
+        .flatMap((n) => {
+          const inputs = (n.data.inputs ?? {}) as Record<string, unknown>;
+          const fromJson = Object.keys(parseVariablesObject(inputs.variables_json));
+          const directName = typeof inputs.variable_name === "string" ? [inputs.variable_name] : [];
+          return [...fromJson, ...directName].map((name) => name.trim()).filter(Boolean);
+        }),
+      ]
+    )
+  );
 
   const onConnect = useCallback(
     (connection: Connection) =>
@@ -226,12 +335,173 @@ function Canvas({ workflowId, initialDefinition, onSave, onRegisterSave, status 
     [setEdges]
   );
 
+  function sleep(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function getExecutionOrder(nodesSnapshot: Node[], edgesSnapshot: Edge[]) {
+    const byId = new Map(nodesSnapshot.map((n) => [n.id, n]));
+    const outgoing = new Map<string, string[]>();
+
+    for (const edge of edgesSnapshot) {
+      const list = outgoing.get(edge.source) ?? [];
+      list.push(edge.target);
+      outgoing.set(edge.source, list);
+    }
+
+    for (const [source, targets] of outgoing.entries()) {
+      targets.sort((a, b) => {
+        const na = byId.get(a);
+        const nb = byId.get(b);
+        if (!na || !nb) return 0;
+        if (na.position.y !== nb.position.y) return na.position.y - nb.position.y;
+        return na.position.x - nb.position.x;
+      });
+      outgoing.set(source, targets);
+    }
+
+    const order: string[] = [];
+    const queue: string[] = ["trigger"];
+    const seen = new Set<string>();
+
+    while (queue.length > 0) {
+      const nodeId = queue.shift()!;
+      if (seen.has(nodeId)) continue;
+      seen.add(nodeId);
+      order.push(nodeId);
+
+      for (const next of outgoing.get(nodeId) ?? []) {
+        if (!seen.has(next)) queue.push(next);
+      }
+    }
+
+    return order;
+  }
+
+  async function focusNode(nodeId: string, nodesSnapshot: Node[]) {
+    setNodes((nds) => nds.map((n) => ({ ...n, selected: n.id === nodeId })));
+    setSelectedNodeId(nodeId === "trigger" ? null : nodeId);
+    const node = nodesSnapshot.find((n) => n.id === nodeId);
+    if (!node) return;
+    const width = node.width ?? 180;
+    const height = node.height ?? 80;
+    await setCenter(node.position.x + width / 2, node.position.y + height / 2, {
+      duration: 450,
+      zoom: 1,
+    });
+  }
+
+  async function playWorkflow() {
+    if (playing) return;
+    const nodesSnapshot = [...nodes];
+    const edgesSnapshot = [...edges];
+    const plannedOrder = getExecutionOrder(nodesSnapshot, edgesSnapshot);
+
+    if (nodesSnapshot.length <= 1) {
+      toast.error("Add at least one action node before running");
+      return;
+    }
+
+    setPlaying(true);
+    setSelectedNodeId(null);
+    setNodes((nds) => nds.map((n) => ({ ...n, selected: false })));
+
+    try {
+      await fitView({ duration: 500, padding: 0.2 });
+      await sleep(250);
+      await focusNode("trigger", nodesSnapshot);
+
+      const executeRes = await fetch(`/api/workflows/${workflowId}/execute?playMode=1`, {
+        method: "POST",
+        headers: { "x-play-mode": "1" },
+      });
+      if (!executeRes.ok) {
+        const raw = await executeRes.text();
+        let msg = "";
+        try {
+          const parsed = JSON.parse(raw) as { error?: string };
+          msg = parsed?.error ?? "";
+        } catch {
+          msg = raw.trim();
+        }
+        throw new Error(msg || `Execution failed (${executeRes.status})`);
+      }
+      const { executionId } = (await executeRes.json()) as { executionId: string };
+
+      const seen = new Set<string>();
+      const terminalStatuses = new Set(["completed", "failed", "cancelled"]);
+      let movedToFirstPlannedNode = false;
+      const startedAt = Date.now();
+      const pendingTimeoutMs = 30000;
+
+      while (true) {
+        const detailRes = await fetch(`/api/executions/${executionId}`, { cache: "no-store" });
+        if (!detailRes.ok) throw new Error("Failed to poll execution status");
+
+        const detail = (await detailRes.json()) as {
+          status: string;
+          steps?: Array<{ node_id: string }>;
+        };
+
+        if (
+          detail.status === "pending" &&
+          Date.now() - startedAt > pendingTimeoutMs
+        ) {
+          throw new Error(
+            "Execution is still pending. Ensure Inngest dev is running and INNGEST_BASE_URL points to http://127.0.0.1:8288"
+          );
+        }
+
+        for (const step of detail.steps ?? []) {
+          if (!step.node_id || seen.has(step.node_id)) continue;
+          seen.add(step.node_id);
+          await focusNode(step.node_id, nodesSnapshot);
+          await sleep(450);
+        }
+
+        // If execution started but no completed step has been written yet,
+        // move to the first planned node so we don't appear stuck on trigger.
+        if (
+          !movedToFirstPlannedNode &&
+          (detail.status === "running" || detail.status === "pending") &&
+          seen.size === 0 &&
+          plannedOrder.length > 1
+        ) {
+          movedToFirstPlannedNode = true;
+          await focusNode(plannedOrder[1], nodesSnapshot);
+        }
+
+        if (terminalStatuses.has(detail.status)) {
+          if (detail.status === "completed") toast.success("Workflow run completed");
+          else toast.error(`Workflow run ${detail.status}`);
+          break;
+        }
+
+        await sleep(800);
+      }
+
+      await fitView({ duration: 500, padding: 0.2 });
+    } finally {
+      setNodes((nds) => nds.map((n) => ({ ...n, selected: false })));
+      setSelectedNodeId(null);
+      setPlaying(false);
+    }
+  }
+
   function addAction(kind: string, position?: { x: number; y: number }) {
     const def = actionsDefinition.find((a) => a.kind === kind);
     if (!def) return;
     const id = `action-${idCounter.current++}`;
-    const nonTriggerCount = nodes.filter((n) => n.type === "action" || n.type === "logic").length;
-    const nodeType = LOGIC_KINDS.has(kind) ? "logic" : "action";
+    const nonTriggerCount = nodes.filter(
+      (n) => n.type === "action" || n.type === "logic" || n.type === "linear" || n.type === "calendly"
+    ).length;
+    const nodeType = LOGIC_KINDS.has(kind)
+      ? "logic"
+      : LINEAR_KINDS.has(kind)
+        ? "linear"
+        : CALENDLY_KINDS.has(kind)
+          ? "calendly"
+          : "action";
     setNodes((nds) => [
       ...nds,
       {
@@ -297,6 +567,74 @@ function Canvas({ workflowId, initialDefinition, onSave, onRegisterSave, status 
     );
   }
 
+  function updateNodeKind(nodeId: string, newKind: string) {
+    const def = actionsDefinition.find((a) => a.kind === newKind);
+    if (!def) return;
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === nodeId
+          ? {
+              ...n,
+              type: LOGIC_KINDS.has(newKind)
+                ? "logic"
+                : LINEAR_KINDS.has(newKind)
+                  ? "linear"
+                  : CALENDLY_KINDS.has(newKind)
+                    ? "calendly"
+                    : "action",
+              data: { ...n.data, kind: newKind, name: def.name, inputs: {} },
+            }
+          : n
+      )
+    );
+  }
+
+  function insertVariableToken(token: string) {
+    if (!panelNode || !focusedInputKey) return;
+    const currentValue = ((panelNode.data.inputs as Record<string, unknown>)?.[focusedInputKey] ?? "") as string;
+    const spacer = currentValue && !currentValue.endsWith(" ") ? " " : "";
+    updateInput(panelNode.id, focusedInputKey, `${currentValue}${spacer}${token}`);
+  }
+
+  function updateSetVariablesInput(
+    nodeId: string,
+    next: { variableName: string; mode: "value" | "expression"; inputValue: string }
+  ) {
+    const trimmedName = next.variableName.trim();
+    const trimmedInput = next.inputValue.trim();
+    const finalValue =
+      next.mode === "expression"
+        ? trimmedInput.startsWith("{{") || trimmedInput.startsWith("!ref(")
+          ? next.inputValue
+          : trimmedInput
+            ? `{{${trimmedInput}}}`
+            : ""
+        : next.inputValue;
+
+    const variablesObj = trimmedName ? { [trimmedName]: finalValue } : {};
+
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === nodeId
+          ? {
+              ...n,
+              data: {
+                ...n.data,
+                inputs: {
+                  ...(n.data.inputs as object),
+                  variable_name: next.variableName,
+                  set_mode: next.mode,
+                  value: next.mode === "value" ? next.inputValue : "",
+                  expression: next.mode === "expression" ? next.inputValue : "",
+                  variables_json: JSON.stringify(variablesObj),
+                },
+              },
+            }
+          : n
+      )
+    );
+  }
+
   function removeNode(nodeId: string) {
     setNodes((nds) => nds.filter((n) => n.id !== nodeId));
     setEdges((eds) => eds.filter((e) => e.source !== nodeId && e.target !== nodeId));
@@ -305,16 +643,146 @@ function Canvas({ workflowId, initialDefinition, onSave, onRegisterSave, status 
 
   async function handleSave() {
     setSaving(true);
-    await onSave(toInngestFormat(nodes, edges));
-    setSaving(false);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+    setSaveError(false);
+    try {
+      await onSave(toInngestFormat(nodes, edges));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {
+      setSaveError(true);
+      setTimeout(() => setSaveError(false), 3000);
+    } finally {
+      setSaving(false);
+    }
   }
 
   // Clear test result when switching nodes
   useEffect(() => {
     setTestResult(null);
+    setFocusedInputKey(null);
   }, [selectedNodeId]);
+
+  // Check integration connection for selected app node
+  useEffect(() => {
+    const kind = selectedNode?.data?.kind as string | undefined;
+    if (!kind || !teamId) {
+      setLinearConnected(null);
+      setLinearTeams([]);
+      setCalendlyConnected(null);
+      return;
+    }
+
+    if (LINEAR_KINDS.has(kind)) {
+      setCalendlyConnected(null);
+      setLinearConnected(null);
+      setLinearTeams([]);
+      fetch(`/api/integrations?teamId=${teamId}`)
+        .then((r) => r.json())
+        .then((data: Array<{ integration_id: string }>) => {
+          const connected = data.some((c) => c.integration_id === "linear");
+          setLinearConnected(connected);
+          if (connected) {
+            fetch(`/api/integrations/linear/teams?teamId=${teamId}`)
+              .then((r) => r.json())
+              .then((teams) => Array.isArray(teams) && setLinearTeams(teams))
+              .catch(() => {});
+          }
+        })
+        .catch(() => setLinearConnected(false));
+      return;
+    }
+
+    setLinearConnected(null);
+    setLinearTeams([]);
+
+    if (CALENDLY_KINDS.has(kind)) {
+      setCalendlyConnected(null);
+      fetch(`/api/integrations?teamId=${teamId}`)
+        .then((r) => r.json())
+        .then((data: Array<{ integration_id: string }>) => {
+          const connected = data.some((c) => c.integration_id === "calendly");
+          setCalendlyConnected(connected);
+        })
+        .catch(() => setCalendlyConnected(false));
+      return;
+    }
+
+    setCalendlyConnected(null);
+  }, [selectedNodeId, teamId, selectedNode?.data?.kind]);
+
+  async function connectLinear() {
+    if (!teamId) return;
+    setConnectingLinear(true);
+    try {
+      const tokenRes = await fetch("/api/nango/session-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ teamId, integrationId: "linear" }),
+      });
+      if (!tokenRes.ok) return;
+      const { sessionToken } = await tokenRes.json();
+      const nango = new Nango();
+      const connect = nango.openConnectUI({
+        onEvent: async (event) => {
+          if (event.type === "connect") {
+            await fetch("/api/integrations", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                teamId,
+                integrationId: "linear",
+                nangoConnectionId: event.payload.connectionId,
+              }),
+            });
+            setLinearConnected(true);
+            toast.success("Linear connected");
+            fetch(`/api/integrations/linear/teams?teamId=${teamId}`)
+              .then((r) => r.json())
+              .then((teams) => Array.isArray(teams) && setLinearTeams(teams))
+              .catch(() => {});
+          }
+        },
+      });
+      connect.setSessionToken(sessionToken);
+    } finally {
+      setConnectingLinear(false);
+    }
+  }
+
+  async function connectCalendly() {
+    if (!teamId) return;
+    setConnectingCalendly(true);
+    try {
+      const tokenRes = await fetch("/api/nango/session-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ teamId, integrationId: "calendly" }),
+      });
+      if (!tokenRes.ok) return;
+      const { sessionToken } = await tokenRes.json();
+      const nango = new Nango();
+      const connect = nango.openConnectUI({
+        onEvent: async (event) => {
+          if (event.type === "connect") {
+            await fetch("/api/integrations", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                teamId,
+                integrationId: "calendly",
+                nangoConnectionId: event.payload.connectionId,
+              }),
+            });
+            setCalendlyConnected(true);
+            toast.success("Calendly connected");
+          }
+        },
+      });
+      connect.setSessionToken(sessionToken);
+    } finally {
+      setConnectingCalendly(false);
+    }
+  }
 
   async function testAction() {
     if (!panelNode || !panelAction) return;
@@ -333,11 +801,16 @@ function Canvas({ workflowId, initialDefinition, onSave, onRegisterSave, status 
       const json = await res.json();
       if (res.ok && json.success) {
         setTestResult({ success: true, data: json.result });
+        toast.success("Action test passed");
       } else {
-        setTestResult({ success: false, error: json.error ?? "Unknown error" });
+        const msg = json.error ?? "Unknown error";
+        setTestResult({ success: false, error: msg });
+        toast.error(`Action test failed: ${msg}`);
       }
     } catch (err) {
-      setTestResult({ success: false, error: err instanceof Error ? err.message : "Network error" });
+      const msg = err instanceof Error ? err.message : "Network error";
+      setTestResult({ success: false, error: msg });
+      toast.error(`Action test failed: ${msg}`);
     } finally {
       setTesting(false);
     }
@@ -376,11 +849,22 @@ function Canvas({ workflowId, initialDefinition, onSave, onRegisterSave, status 
               </div>
             )}
             <button
+              onClick={playWorkflow}
+              disabled={playing || saving}
+              className="px-4 py-1.5 backdrop-blur-md rounded-xl text-sm font-medium shadow-lg border transition-colors disabled:opacity-50 bg-emerald-600/90 text-white border-emerald-500/30 hover:bg-emerald-700"
+            >
+              {playing ? "Running..." : "Play"}
+            </button>
+            <button
               onClick={handleSave}
               disabled={saving}
-              className="px-4 py-1.5 bg-zinc-900/90 dark:bg-zinc-100/90 backdrop-blur-md text-white dark:text-zinc-900 rounded-xl text-sm font-medium shadow-lg border border-zinc-700/20 hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-colors disabled:opacity-50"
+              className={`px-4 py-1.5 backdrop-blur-md rounded-xl text-sm font-medium shadow-lg border transition-colors disabled:opacity-50 ${
+                saveError
+                  ? "bg-red-600/90 text-white border-red-500/30 hover:bg-red-700"
+                  : "bg-zinc-900/90 dark:bg-zinc-100/90 text-white dark:text-zinc-900 border-zinc-700/20 hover:bg-zinc-800 dark:hover:bg-zinc-200"
+              }`}
             >
-              {saving ? "Saving…" : saved ? "✓ Saved" : "Save"}
+              {saving ? "Saving…" : saved ? "✓ Saved" : saveError ? "✗ Save failed" : "Save"}
             </button>
           </div>
 
@@ -537,7 +1021,117 @@ function Canvas({ workflowId, initialDefinition, onSave, onRegisterSave, status 
                   </button>
                 </div>
                 <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-                  {Object.entries(panelAction.inputs ?? {}).map(([key, input]) => {
+                  {/* Linear connection banner */}
+                  {LINEAR_KINDS.has(panelNode.data.kind as string) && linearConnected === false && (
+                    <div className="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950 p-3 space-y-2">
+                      <p className="text-xs font-semibold text-amber-800 dark:text-amber-200">Linear not connected</p>
+                      <p className="text-[10px] text-amber-700 dark:text-amber-400">Connect your Linear account to use this action.</p>
+                      <button
+                        onClick={connectLinear}
+                        disabled={connectingLinear}
+                        className="w-full px-3 py-1.5 text-xs font-medium bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        {connectingLinear ? "Connecting…" : "Connect Linear"}
+                      </button>
+                    </div>
+                  )}
+                  {LINEAR_KINDS.has(panelNode.data.kind as string) && linearConnected === true && (
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 text-[10px] text-emerald-600 dark:text-emerald-400">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
+                        Linear connected
+                      </div>
+                      <button
+                        onClick={connectLinear}
+                        disabled={connectingLinear}
+                        className="text-[10px] text-zinc-400 hover:text-zinc-600 underline disabled:opacity-50"
+                      >
+                        Reconnect
+                      </button>
+                    </div>
+                  )}
+                  {CALENDLY_KINDS.has(panelNode.data.kind as string) && calendlyConnected === false && (
+                    <div className="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950 p-3 space-y-2">
+                      <p className="text-xs font-semibold text-amber-800 dark:text-amber-200">Calendly not connected</p>
+                      <p className="text-[10px] text-amber-700 dark:text-amber-400">Connect your Calendly account to use this action.</p>
+                      <button
+                        onClick={connectCalendly}
+                        disabled={connectingCalendly}
+                        className="w-full px-3 py-1.5 text-xs font-medium bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        {connectingCalendly ? "Connecting..." : "Connect Calendly"}
+                      </button>
+                    </div>
+                  )}
+                  {CALENDLY_KINDS.has(panelNode.data.kind as string) && calendlyConnected === true && (
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 text-[10px] text-emerald-600 dark:text-emerald-400">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
+                        Calendly connected
+                      </div>
+                      <button
+                        onClick={connectCalendly}
+                        disabled={connectingCalendly}
+                        className="text-[10px] text-zinc-400 hover:text-zinc-600 underline disabled:opacity-50"
+                      >
+                        Reconnect
+                      </button>
+                    </div>
+                  )}
+                  {panelIntegrationActions.length > 0 && (
+                    <div>
+                      <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">Action</label>
+                      <select
+                        value={panelNode.data.kind as string}
+                        onChange={(e) => updateNodeKind(panelNode.id, e.target.value)}
+                        className="w-full text-xs border border-zinc-200 dark:border-zinc-700 rounded-md px-2 py-1.5 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-400"
+                      >
+                        {panelIntegrationActions.map((action) => (
+                          <option key={action.kind} value={action.kind}>
+                            {action.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {panelNode.data.kind === "logic_delay" ? (
+                    <DelayPanel
+                      value={((panelNode.data.inputs as Record<string, unknown>)?.duration ?? "") as string}
+                      onChange={(v) => updateInput(panelNode.id, "duration", v)}
+                    />
+                  ) : panelNode.data.kind === "logic_set_variables" ? (() => {
+                    const inputs = (panelNode.data.inputs as Record<string, unknown>) ?? {};
+                    const varsFromJson = parseVariablesObject(inputs.variables_json);
+                    const firstEntry = Object.entries(varsFromJson)[0];
+                    const derivedName = firstEntry?.[0] ?? "";
+                    const derivedValue = firstEntry?.[1] ?? "";
+
+                    const variableName = (inputs.variable_name as string) ?? derivedName;
+                    const mode =
+                      (inputs.set_mode as string) === "expression" ||
+                      (typeof derivedValue === "string" && (derivedValue.startsWith("{{") || derivedValue.startsWith("!ref(")))
+                        ? "expression"
+                        : "value";
+                    const inputValue =
+                      mode === "expression"
+                        ? ((inputs.expression as string) ?? String(derivedValue ?? ""))
+                        : ((inputs.value as string) ?? String(derivedValue ?? ""));
+
+                    return (
+                      <SetVariablePanel
+                        variableName={variableName}
+                        mode={mode}
+                        inputValue={inputValue}
+                        suggestions={knownVariableNames}
+                        onChange={(next) => updateSetVariablesInput(panelNode.id, next)}
+                      />
+                    );
+                  })() : panelNode.data.kind === "builtin:if" ? (
+                    <ConditionPanel
+                      value={((panelNode.data.inputs as Record<string, unknown>)?.condition ?? "") as string}
+                      onChange={(v) => updateInput(panelNode.id, "condition", v)}
+                    />
+                  ) : Object.entries(panelAction.inputs ?? {}).map(([key, input]) => {
                     const inputDef = input as {
                       type: { title?: string; description?: string };
                       fieldType?: string;
@@ -545,6 +1139,8 @@ function Canvas({ workflowId, initialDefinition, onSave, onRegisterSave, status 
                     const value = (
                       ((panelNode.data.inputs as Record<string, unknown>)?.[key] ?? "") as string
                     );
+                    const isLinearTeamField =
+                      key === "team_id" && LINEAR_KINDS.has(panelNode.data.kind as string);
                     return (
                       <div key={key}>
                         <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
@@ -553,10 +1149,24 @@ function Canvas({ workflowId, initialDefinition, onSave, onRegisterSave, status 
                         {inputDef.type?.description && (
                           <p className="text-[10px] text-zinc-400 mb-1">{inputDef.type.description}</p>
                         )}
-                        {inputDef.fieldType === "textarea" ? (
+                        {isLinearTeamField && linearTeams.length > 0 ? (
+                          <select
+                            value={value}
+                            onChange={(e) => updateInput(panelNode.id, key, e.target.value)}
+                            className="w-full text-xs border border-zinc-200 dark:border-zinc-700 rounded-md px-2 py-1.5 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-400"
+                          >
+                            <option value="">Select a team…</option>
+                            {linearTeams.map((t) => (
+                              <option key={t.id} value={t.id}>
+                                {t.name} ({t.key})
+                              </option>
+                            ))}
+                          </select>
+                        ) : inputDef.fieldType === "textarea" ? (
                           <textarea
                             value={value}
                             onChange={(e) => updateInput(panelNode.id, key, e.target.value)}
+                            onFocus={() => setFocusedInputKey(key)}
                             rows={3}
                             className="w-full text-xs border border-zinc-200 dark:border-zinc-700 rounded-md px-2 py-1.5 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 resize-none focus:outline-none focus:ring-1 focus:ring-zinc-400"
                           />
@@ -565,6 +1175,7 @@ function Canvas({ workflowId, initialDefinition, onSave, onRegisterSave, status 
                             type="text"
                             value={value}
                             onChange={(e) => updateInput(panelNode.id, key, e.target.value)}
+                            onFocus={() => setFocusedInputKey(key)}
                             className="w-full text-xs border border-zinc-200 dark:border-zinc-700 rounded-md px-2 py-1.5 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-400"
                           />
                         )}

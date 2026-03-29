@@ -6,6 +6,9 @@ import {
   executeGmailSendEmail,
   executeGoogleSheetsAppendRow,
   executeHttpRequest,
+  executeLinearCreateIssue,
+  executeLinearUpdateIssue,
+  executeCalendlyCreateSchedulingLink,
 } from "@/lib/integrations/actions";
 
 /** Test a single workflow action with the given inputs */
@@ -89,6 +92,107 @@ export async function POST(request: NextRequest) {
           method: String(inputs.method ?? "GET"),
           body: inputs.body ? String(inputs.body) : undefined,
         });
+        break;
+      }
+      case "linear_create_issue": {
+        const { data: conn } = await db
+          .from("nango_connections")
+          .select("nango_connection_id")
+          .eq("team_id", teamId)
+          .eq("integration_id", "linear")
+          .single();
+        if (!conn) return errorResponse("Linear not connected for this team", 400);
+        const priority = inputs.priority ? parseInt(String(inputs.priority), 10) : undefined;
+        result = await executeLinearCreateIssue(conn.nango_connection_id, {
+          team_id: String(inputs.team_id ?? ""),
+          title: String(inputs.title ?? "Untitled"),
+          description: inputs.description ? String(inputs.description) : undefined,
+          priority: priority !== undefined && !isNaN(priority) ? priority : undefined,
+          assignee_id: inputs.assignee_id ? String(inputs.assignee_id) : undefined,
+        });
+        break;
+      }
+      case "linear_update_issue": {
+        const { data: conn } = await db
+          .from("nango_connections")
+          .select("nango_connection_id")
+          .eq("team_id", teamId)
+          .eq("integration_id", "linear")
+          .single();
+        if (!conn) return errorResponse("Linear not connected for this team", 400);
+        const priority = inputs.priority ? parseInt(String(inputs.priority), 10) : undefined;
+        result = await executeLinearUpdateIssue(conn.nango_connection_id, {
+          issue_id: String(inputs.issue_id ?? ""),
+          title: inputs.title ? String(inputs.title) : undefined,
+          description: inputs.description ? String(inputs.description) : undefined,
+          state_id: inputs.state_id ? String(inputs.state_id) : undefined,
+          priority: priority !== undefined && !isNaN(priority) ? priority : undefined,
+        });
+        break;
+      }
+      case "calendly_create_scheduling_link": {
+        const { data: conn } = await db
+          .from("nango_connections")
+          .select("nango_connection_id")
+          .eq("team_id", teamId)
+          .eq("integration_id", "calendly")
+          .single();
+        if (!conn) return errorResponse("Calendly not connected for this team", 400);
+        const maxCount = inputs.max_event_count ? parseInt(String(inputs.max_event_count), 10) : 1;
+        result = await executeCalendlyCreateSchedulingLink(conn.nango_connection_id, {
+          event_type_uri: String(inputs.event_type_uri ?? ""),
+          max_event_count: !isNaN(maxCount) ? maxCount : 1,
+        });
+        break;
+      }
+      case "logic_set_variables": {
+        const raw = inputs.variables_json;
+        if (!raw) {
+          const variableName = String(inputs.variable_name ?? "").trim();
+          if (!variableName) {
+            result = {};
+            break;
+          }
+
+          const mode = String(inputs.set_mode ?? "value") === "expression" ? "expression" : "value";
+          const rawInput = mode === "expression" ? String(inputs.expression ?? "") : String(inputs.value ?? "");
+          const trimmed = rawInput.trim();
+          const finalValue =
+            mode === "expression"
+              ? trimmed.startsWith("{{") || trimmed.startsWith("!ref(")
+                ? rawInput
+                : trimmed
+                  ? `{{${trimmed}}}`
+                  : ""
+              : rawInput;
+
+          result = { [variableName]: finalValue };
+          break;
+        }
+
+        if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+          result = raw;
+          break;
+        }
+
+        const json = String(raw).trim();
+        if (!json) {
+          result = {};
+          break;
+        }
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(json);
+        } catch {
+          return errorResponse("Invalid Variables JSON", 400);
+        }
+
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          return errorResponse("Variables JSON must be an object", 400);
+        }
+
+        result = parsed;
         break;
       }
       default:

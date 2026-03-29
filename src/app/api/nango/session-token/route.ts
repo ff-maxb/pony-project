@@ -16,6 +16,14 @@ const NANGO_INTEGRATION_ID: Record<string, string> = {
 };
 
 /**
+ * Scopes to request per integration.
+ * Nango passes these as authorization_params overrides when opening OAuth.
+ */
+const INTEGRATION_SCOPES: Record<string, string> = {
+  linear: "read,write",
+};
+
+/**
  * Generate a Nango Connect session token.
  * The frontend calls this before opening the Nango Connect UI.
  */
@@ -39,6 +47,7 @@ export async function POST(request: NextRequest) {
     const nango = new Nango({ secretKey: process.env.NANGO_SECRET_KEY });
 
     const nangoIntegrationId = integrationId ? NANGO_INTEGRATION_ID[integrationId] : undefined;
+    const scopeOverride = integrationId ? INTEGRATION_SCOPES[integrationId] : undefined;
 
     const result = await nango.createConnectSession({
       end_user: {
@@ -47,6 +56,13 @@ export async function POST(request: NextRequest) {
       },
       organization: { id: teamId },
       ...(nangoIntegrationId ? { allowed_integrations: [nangoIntegrationId] } : {}),
+      ...(nangoIntegrationId && scopeOverride ? {
+        integrations_config_defaults: {
+          [nangoIntegrationId]: {
+            connection_config: { oauth_scopes_override: scopeOverride },
+          },
+        },
+      } : {}),
     });
 
     return jsonResponse({ sessionToken: result.data.token });

@@ -89,3 +89,148 @@ export async function executeHttpRequest(config: {
   const data = await resp.json().catch(() => resp.text());
   return { status: resp.status, data };
 }
+
+async function linearGraphQL(
+  connectionId: string,
+  query: string,
+  variables: Record<string, unknown>
+) {
+  const nango = getNango();
+  // Get the access token directly and call Linear's API ourselves.
+  // Using nango.proxy for GraphQL endpoints can be unreliable.
+  const connection = await nango.getConnection("linear", connectionId);
+  const credentials = connection.credentials as Record<string, unknown>;
+  const token = (credentials.access_token ?? credentials.token ?? credentials.apiKey) as string | undefined;
+  if (!token) {
+    console.error("[linearGraphQL] credentials shape:", Object.keys(credentials));
+    throw new Error("No Linear access token found");
+  }
+
+  const resp = await fetch("https://api.linear.app/graphql", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`,
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+  if (!resp.ok) {
+    const errBody = await resp.text().catch(() => "");
+    console.error("[linearGraphQL] HTTP error", resp.status, errBody);
+    throw new Error(`Linear API error: ${resp.status} ${resp.statusText} — ${errBody}`);
+  }
+  const body = (await resp.json()) as { data?: unknown; errors?: Array<{ message: string }> };
+  if (body.errors?.length) throw new Error(body.errors.map((e) => e.message).join("; "));
+  return body.data;
+}
+
+export async function fetchLinearTeams(connectionId: string): Promise<Array<{ id: string; name: string; key: string }>> {
+  const query = `
+    query Teams {
+      teams {
+        nodes { id name key }
+      }
+    }
+  `;
+  const data = (await linearGraphQL(connectionId, query, {})) as {
+    teams: { nodes: Array<{ id: string; name: string; key: string }> };
+  };
+  return data.teams.nodes;
+}
+
+export async function executeLinearCreateIssue(
+  connectionId: string,
+  config: {
+    team_id: string;
+    title: string;
+    description?: string;
+    priority?: number;
+    assignee_id?: string;
+  }
+) {
+  const input: Record<string, unknown> = {
+    teamId: config.team_id,
+    title: config.title,
+  };
+  if (config.description) input.description = config.description;
+  if (config.priority !== undefined) input.priority = config.priority;
+  if (config.assignee_id) input.assigneeId = config.assignee_id;
+
+  const query = `
+    mutation CreateIssue($input: IssueCreateInput!) {
+      issueCreate(input: $input) {
+        success
+        issue {
+          id
+          identifier
+          title
+          url
+          priority
+          state { name }
+        }
+      }
+    }
+  `;
+  const data = (await linearGraphQL(connectionId, query, { input })) as {
+    issueCreate: { success: boolean; issue: Record<string, unknown> };
+  };
+  if (!data.issueCreate.success) throw new Error("Linear issue creation failed");
+  return data.issueCreate.issue;
+}
+
+export async function executeLinearUpdateIssue(
+  connectionId: string,
+  config: {
+    issue_id: string;
+    title?: string;
+    description?: string;
+    state_id?: string;
+    priority?: number;
+  }
+) {
+  const input: Record<string, unknown> = {};
+  if (config.title) input.title = config.title;
+  if (config.description) input.description = config.description;
+  if (config.state_id) input.stateId = config.state_id;
+  if (config.priority !== undefined) input.priority = config.priority;
+
+  const query = `
+    mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+      issueUpdate(id: $id, input: $input) {
+        success
+        issue {
+          id
+          identifier
+          title
+          url
+          priority
+          state { name }
+        }
+      }
+    }
+  `;
+  const data = (await linearGraphQL(connectionId, query, { id: config.issue_id, input })) as {
+    issueUpdate: { success: boolean; issue: Record<string, unknown> };
+  };
+  if (!data.issueUpdate.success) throw new Error("Linear issue update failed");
+  return data.issueUpdate.issue;
+}
+
+export async function executeCalendlyCreateSchedulingLink(
+  connectionId: string,
+  config: { event_type_uri: string; max_event_count?: number }
+) {
+  const nango = getNango();
+  const resp = await nango.proxy({
+    method: "POST",
+    endpoint: "/scheduling_links",
+    providerConfigKey: "calendly",
+    connectionId,
+    data: {
+      max_event_count: config.max_event_count ?? 1,
+      owner: config.event_type_uri,
+      owner_type: "EventType",
+    },
+  });
+  return resp.data;
+}

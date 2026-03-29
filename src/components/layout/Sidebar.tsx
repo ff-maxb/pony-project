@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { OrganizationSwitcher } from "@clerk/nextjs";
+import { OrganizationSwitcher, UserButton } from "@clerk/nextjs";
 import {
   LayoutDashboard,
   Plug,
@@ -25,26 +25,25 @@ export default function Sidebar() {
   const pathname = usePathname();
 
   return (
-    <aside className="w-56 shrink-0 bg-white border-r border-zinc-200 flex flex-col h-full">
-      {/* Workspace switcher */}
-      <div className="px-3 py-3 border-b border-zinc-100">
+    <aside className="relative z-10 flex h-full w-64 shrink-0 flex-col border-r border-zinc-200/70 bg-white/85 backdrop-blur">
+      <div className="border-b border-zinc-200/80 px-3 py-3">
         <OrganizationSwitcher
           hidePersonal
           appearance={{
             elements: {
               rootBox: "w-full",
               organizationSwitcherTrigger:
-                "w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm font-medium text-zinc-900 hover:bg-zinc-50 transition-colors border-0 shadow-none bg-transparent",
-              organizationSwitcherTriggerIcon: "text-zinc-400 ml-auto",
-              organizationPreviewTextContainer: "text-zinc-900",
-              organizationPreviewSecondaryIdentifier: "text-zinc-400 text-xs",
+                "w-full h-9 flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-2.5 text-sm font-medium text-zinc-900 transition hover:border-zinc-300 hover:bg-zinc-50 shadow-none min-w-0",
+              organizationSwitcherTriggerIcon: "text-zinc-400 ml-auto shrink-0",
+              organizationPreviewTextContainer: "text-zinc-900 truncate",
+              organizationPreviewSecondaryIdentifier: "text-zinc-400 text-xs truncate",
             },
           }}
         />
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 p-2 space-y-0.5 pt-3">
+      <nav className="flex-1 space-y-1 p-2.5 pt-3">
         {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
           const isActive =
             href === "/workflows"
@@ -54,13 +53,13 @@ export default function Sidebar() {
             <Link
               key={href}
               href={href}
-              className={`flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-colors ${
+              className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition ${
                 isActive
-                  ? "bg-zinc-100 text-zinc-900 font-medium"
-                  : "text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900"
+                  ? "border border-zinc-200 bg-zinc-900 text-white shadow-sm"
+                  : "border border-transparent text-zinc-600 hover:border-zinc-200 hover:bg-white hover:text-zinc-900"
               }`}
             >
-              <Icon size={16} strokeWidth={1.75} />
+              <Icon size={16} strokeWidth={1.75} className={isActive ? "text-white" : "text-zinc-500"} />
               {label}
             </Link>
           );
@@ -68,21 +67,24 @@ export default function Sidebar() {
       </nav>
 
       {/* Bottom links */}
-      <div className="p-2 border-t border-zinc-100 space-y-0.5">
+      <div className="space-y-1 border-t border-zinc-200/80 p-2.5">
         <Link
           href="/support"
-          className="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900 transition-colors"
+          className="flex items-center gap-2.5 rounded-lg border border-transparent px-3 py-2 text-sm text-zinc-500 transition hover:border-zinc-200 hover:bg-white hover:text-zinc-900"
         >
           <HelpCircle size={16} strokeWidth={1.75} />
           Support
         </Link>
         <Link
           href="/docs"
-          className="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900 transition-colors"
+          className="flex items-center gap-2.5 rounded-lg border border-transparent px-3 py-2 text-sm text-zinc-500 transition hover:border-zinc-200 hover:bg-white hover:text-zinc-900"
         >
           <BookOpen size={16} strokeWidth={1.75} />
           Docs
         </Link>
+          <div className="mt-1 flex items-center gap-2.5 rounded-lg border border-transparent px-3 py-2">
+            <UserButton />
+          </div>
       </div>
     </aside>
   );

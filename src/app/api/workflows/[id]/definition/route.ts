@@ -21,8 +21,8 @@ export async function PUT(
 
     const body = await request.json();
     const { definition } = body;
-    if (!definition || !definition.nodes || !definition.edges) {
-      return errorResponse("definition with nodes and edges is required");
+    if (!definition || !Array.isArray(definition.actions) || !Array.isArray(definition.edges)) {
+      return errorResponse("definition with actions and edges is required");
     }
 
     // Get current max version
@@ -49,7 +49,8 @@ export async function PUT(
 
     if (error) return errorResponse(error.message, 500);
     return jsonResponse(version, 201);
-  } catch {
-    return errorResponse("Unauthorized", 401);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return errorResponse(msg, msg === "Unauthorized" || msg === "Not a member of this team" ? 401 : 500);
   }
 }

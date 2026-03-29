@@ -20,7 +20,7 @@ export const actionsDefinition: PublicEngineAction[] = [
       message: {
         type: Type.String({
           title: "Message",
-          description: "The message text to send. Use {{event.data.field}} to reference trigger data.",
+          description: "The message text to send. Variables supported: {{event.data.field}}, {{steps.action-id.field}}, or !ref($.event.data.field).",
         }),
         fieldType: "textarea",
       },
@@ -135,6 +135,116 @@ export const actionsDefinition: PublicEngineAction[] = [
         { name: "True", conditional: { type: "if" as const, ref: "!ref($.result)" } },
         { name: "False", conditional: { type: "else" as const, ref: "!ref($.result)" } },
       ],
+    },
+  },
+  {
+    kind: "linear_create_issue",
+    name: "Linear: Create Issue",
+    description: "Create a new issue in a Linear team",
+    inputs: {
+      team_id: {
+        type: Type.String({
+          title: "Team ID",
+          description: "Linear team ID (find in team settings URL)",
+        }),
+      },
+      title: {
+        type: Type.String({
+          title: "Title",
+          description: "Issue title",
+        }),
+      },
+      description: {
+        type: Type.String({
+          title: "Description",
+          description: "Issue description (Markdown supported)",
+        }),
+        fieldType: "textarea",
+      },
+      priority: {
+        type: Type.String({
+          title: "Priority",
+          description: "0 = No priority, 1 = Urgent, 2 = High, 3 = Medium, 4 = Low",
+        }),
+      },
+      assignee_id: {
+        type: Type.String({
+          title: "Assignee ID",
+          description: "Linear user ID to assign the issue to (optional)",
+        }),
+      },
+    },
+  },
+  {
+    kind: "linear_update_issue",
+    name: "Linear: Update Issue",
+    description: "Update an existing Linear issue",
+    inputs: {
+      issue_id: {
+        type: Type.String({
+          title: "Issue ID",
+          description: "Linear issue ID (e.g. from a previous Create Issue step: !ref($.issue.id))",
+        }),
+      },
+      title: {
+        type: Type.String({
+          title: "Title",
+          description: "New title (leave blank to keep existing)",
+        }),
+      },
+      description: {
+        type: Type.String({
+          title: "Description",
+          description: "New description (leave blank to keep existing)",
+        }),
+        fieldType: "textarea",
+      },
+      state_id: {
+        type: Type.String({
+          title: "State ID",
+          description: "Linear workflow state ID to set (optional)",
+        }),
+      },
+      priority: {
+        type: Type.String({
+          title: "Priority",
+          description: "0 = No priority, 1 = Urgent, 2 = High, 3 = Medium, 4 = Low",
+        }),
+      },
+    },
+  },
+  {
+    kind: "calendly_create_scheduling_link",
+    name: "Calendly: Create Scheduling Link",
+    description: "Generate a one-off scheduling link for a Calendly event type",
+    inputs: {
+      event_type_uri: {
+        type: Type.String({
+          title: "Event Type URI",
+          description: "Calendly event type URI, e.g. https://api.calendly.com/event_types/xxx",
+        }),
+      },
+      max_event_count: {
+        type: Type.String({
+          title: "Max Uses",
+          description: "How many times the link can be used (default: 1)",
+        }),
+      },
+    },
+  },
+  {
+    kind: "logic_set_variables",
+    name: "Set Variables",
+    description: "Set reusable workflow variables for downstream steps",
+    inputs: {
+      variables_json: {
+        type: Type.String({
+          title: "Variables (JSON)",
+          description:
+            'JSON object of variable names to values. Supports references in values, e.g. {"email":"{{event.data.email}}","issueId":"{{steps.action-1.id}}"}',
+        }),
+        fieldType: "textarea",
+      },
     },
   },
 ];

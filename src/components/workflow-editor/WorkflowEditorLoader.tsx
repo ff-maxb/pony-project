@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import type { Workflow } from "@inngest/workflow-kit";
@@ -115,7 +116,14 @@ export function WorkflowEditorLoader({ workflowId }: Props) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ definition: workflow }),
     });
-    if (!res.ok) console.error("Failed to save workflow definition");
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      console.error("Failed to save workflow definition", res.status, body);
+      const msg = body?.error ?? `Save failed (${res.status})`;
+      toast.error(msg);
+      throw new Error(msg);
+    }
+    toast.success("Workflow saved");
   }
 
   function startEditingName() {
@@ -219,6 +227,7 @@ export function WorkflowEditorLoader({ workflowId }: Props) {
         {activeTab === "builder" && (
           <WorkflowCanvas
             workflowId={workflowId}
+            teamId={workflowRecord?.team_id}
             initialDefinition={definition ?? undefined}
             onSave={handleSave}
             status={workflowRecord?.status}

@@ -163,6 +163,7 @@ export const AVAILABLE_INTEGRATIONS: IntegrationDefinition[] = [
     description: 'Create and manage Linear issues',
     actions: [
       { kind: 'linear_create_issue', label: 'Create Issue', description: 'Create a new issue in Linear' },
+      { kind: 'linear_update_issue', label: 'Update Issue', description: 'Update an existing Linear issue' },
     ],
   },
   {
