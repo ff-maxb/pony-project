@@ -175,4 +175,22 @@ export const AVAILABLE_INTEGRATIONS: IntegrationDefinition[] = [
       { kind: 'calendly_create_scheduling_link', label: 'Create Scheduling Link', description: 'Generate a one-off scheduling link' },
     ],
   },
+  {
+    id: 'sendgrid',
+    name: 'Send Email',
+    icon: '✉️',
+    description: 'Send emails',
+    actions: [
+      { kind: 'sendgrid_send_email', label: 'Send Email', description: 'Send an email' },
+    ],
+  },
+  {
+    id: 'twilio',
+    name: 'Send SMS',
+    icon: '📱',
+    description: 'Send SMS messages',
+    actions: [
+      { kind: 'twilio_send_sms', label: 'Send SMS', description: 'Send an SMS message' },
+    ],
+  },
 ];

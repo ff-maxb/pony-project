@@ -8,6 +8,8 @@ import {
   executeLinearCreateIssue,
   executeLinearUpdateIssue,
   executeCalendlyCreateSchedulingLink,
+  executeSendGridSendEmail,
+  executeTwilioSendSms,
 } from "@/lib/integrations/actions";
 import { actionsDefinition } from "./actions-definition";
 
@@ -397,6 +399,63 @@ export const engineActions: EngineAction[] = [
       });
 
       return result;
+    },
+  },
+  {
+    ...actionsDefinition[10], // sendgrid_send_email
+    handler: async ({ event, step, workflowAction }) => {
+      const { executionId } = event.data as { executionId: string };
+      const inputs = workflowAction.inputs ?? {};
+
+      return await step.run(`action-${workflowAction.id}-sendgrid`, async () => {
+        const result = await executeSendGridSendEmail({
+          to: String(inputs.to ?? ""),
+          from: String(inputs.from ?? ""),
+          subject: String(inputs.subject ?? ""),
+          body: String(inputs.body ?? ""),
+        });
+
+        const db = createAdminClient();
+        await db.from("execution_steps").insert({
+          execution_id: executionId,
+          node_id: workflowAction.id,
+          step_name: workflowAction.name ?? "Send Email",
+          status: "completed",
+          output_data: result,
+          started_at: new Date().toISOString(),
+          completed_at: new Date().toISOString(),
+        });
+
+        return result;
+      });
+    },
+  },
+  {
+    ...actionsDefinition[11], // twilio_send_sms
+    handler: async ({ event, step, workflowAction }) => {
+      const { executionId } = event.data as { executionId: string };
+      const inputs = workflowAction.inputs ?? {};
+
+      return await step.run(`action-${workflowAction.id}-twilio`, async () => {
+        const result = await executeTwilioSendSms({
+          to: String(inputs.to ?? ""),
+          from: String(inputs.from ?? ""),
+          message: String(inputs.message ?? ""),
+        });
+
+        const db = createAdminClient();
+        await db.from("execution_steps").insert({
+          execution_id: executionId,
+          node_id: workflowAction.id,
+          step_name: workflowAction.name ?? "Send SMS",
+          status: "completed",
+          output_data: result,
+          started_at: new Date().toISOString(),
+          completed_at: new Date().toISOString(),
+        });
+
+        return result;
+      });
     },
   },
 ];

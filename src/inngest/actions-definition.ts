@@ -28,7 +28,7 @@ export const actionsDefinition: PublicEngineAction[] = [
   },
   {
     kind: "gmail_send_email",
-    name: "Send Email (Gmail)",
+    name: "Gmail",
     description: "Send an email via Gmail",
     inputs: {
       to: {
@@ -242,6 +242,66 @@ export const actionsDefinition: PublicEngineAction[] = [
           title: "Variables (JSON)",
           description:
             'JSON object of variable names to values. Supports references in values, e.g. {"email":"{{event.data.email}}","issueId":"{{steps.action-1.id}}"}',
+        }),
+        fieldType: "textarea",
+      },
+    },
+  },
+  {
+    kind: "sendgrid_send_email",
+    name: "Send Email",
+    description: "Send an email via SendGrid",
+    inputs: {
+      to: {
+        type: Type.String({
+          title: "To",
+          description: "Recipient email address",
+          format: "email",
+        }),
+      },
+      from: {
+        type: Type.String({
+          title: "From",
+          description: "Sender email address (must be verified in SendGrid)",
+          format: "email",
+        }),
+      },
+      subject: {
+        type: Type.String({
+          title: "Subject",
+          description: "Email subject line",
+        }),
+      },
+      body: {
+        type: Type.String({
+          title: "Body",
+          description: "Email body (plain text or HTML)",
+        }),
+        fieldType: "textarea",
+      },
+    },
+  },
+  {
+    kind: "twilio_send_sms",
+    name: "Send SMS",
+    description: "Send an SMS via Twilio",
+    inputs: {
+      to: {
+        type: Type.String({
+          title: "To",
+          description: "Recipient phone number (E.164 format, e.g. +15551234567)",
+        }),
+      },
+      from: {
+        type: Type.String({
+          title: "From",
+          description: "Twilio phone number to send from (E.164 format)",
+        }),
+      },
+      message: {
+        type: Type.String({
+          title: "Message",
+          description: "SMS message text. Variables supported: {{event.data.field}}, {{steps.action-id.field}}",
         }),
         fieldType: "textarea",
       },

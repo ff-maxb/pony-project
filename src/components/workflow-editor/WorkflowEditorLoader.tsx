@@ -123,7 +123,6 @@ export function WorkflowEditorLoader({ workflowId }: Props) {
       toast.error(msg);
       throw new Error(msg);
     }
-    toast.success("Workflow saved");
   }
 
   function startEditingName() {
@@ -224,7 +223,8 @@ export function WorkflowEditorLoader({ workflowId }: Props) {
           })}
         </div>
 
-        {activeTab === "builder" && (
+        {/* Builder — always mounted so auto-save timer is never lost */}
+        <div className={activeTab === "builder" ? "h-full" : "hidden"}>
           <WorkflowCanvas
             workflowId={workflowId}
             teamId={workflowRecord?.team_id}
@@ -232,7 +232,7 @@ export function WorkflowEditorLoader({ workflowId }: Props) {
             onSave={handleSave}
             status={workflowRecord?.status}
           />
-        )}
+        </div>
         {/* Enrollment History */}
         {activeTab === "enrollment" && (
           <ExecutionsTab

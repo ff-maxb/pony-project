@@ -234,3 +234,52 @@ export async function executeCalendlyCreateSchedulingLink(
   });
   return resp.data;
 }
+
+// =============================================
+// SendGrid — direct SDK (not via Nango)
+// =============================================
+
+export async function executeSendGridSendEmail(config: {
+  to: string;
+  from: string;
+  subject: string;
+  body: string;
+}) {
+  const sgMail = await import("@sendgrid/mail");
+  const apiKey = process.env.SENDGRID_API_KEY;
+  if (!apiKey) throw new Error("Missing SENDGRID_API_KEY environment variable");
+  sgMail.default.setApiKey(apiKey);
+
+  const [response] = await sgMail.default.send({
+    to: config.to,
+    from: config.from,
+    subject: config.subject,
+    html: config.body,
+  });
+
+  return { statusCode: response.statusCode, messageId: response.headers["x-message-id"] };
+}
+
+// =============================================
+// Twilio — direct SDK (not via Nango)
+// =============================================
+
+export async function executeTwilioSendSms(config: {
+  to: string;
+  from: string;
+  message: string;
+}) {
+  const twilio = await import("twilio");
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  if (!accountSid || !authToken) throw new Error("Missing TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN environment variables");
+
+  const client = twilio.default(accountSid, authToken);
+  const result = await client.messages.create({
+    to: config.to,
+    from: config.from,
+    body: config.message,
+  });
+
+  return { sid: result.sid, status: result.status, to: result.to, from: result.from };
+}

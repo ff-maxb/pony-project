@@ -20,6 +20,7 @@ const NANGO_INTEGRATION_ID: Record<string, string> = {
  * Nango passes these as authorization_params overrides when opening OAuth.
  */
 const INTEGRATION_SCOPES: Record<string, string> = {
+  gmail: "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile openid",
   linear: "read,write",
 };
 

@@ -27,10 +27,10 @@ export default function LinearNode({
     >
       <Handle type="target" position={Position.Top} className="!bg-violet-400 !w-3 !h-3" />
       <div className="flex items-center gap-1.5">
-        <span className="text-[11px] font-bold text-violet-500">◈</span>
-        <p className="text-xs font-semibold text-violet-800 dark:text-violet-200">Linear</p>
+        <img src="/integrations/linear.svg" alt="Linear" className="w-3.5 h-3.5 object-contain" />
+        <p className="text-xs font-semibold text-zinc-800 dark:text-zinc-100">Linear</p>
       </div>
-      <p className="text-[10px] text-violet-400 mt-0.5">{actionLabel}</p>
+      <p className="text-[10px] text-zinc-400 mt-0.5">{actionLabel}</p>
       <Handle type="source" position={Position.Bottom} className="!bg-violet-400 !w-3 !h-3" />
     </div>
   );

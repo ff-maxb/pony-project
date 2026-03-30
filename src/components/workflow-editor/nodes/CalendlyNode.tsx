@@ -25,9 +25,10 @@ export default function CalendlyNode({
     >
       <Handle type="target" position={Position.Top} className="!bg-[#4A90FF] !w-3 !h-3" />
       <div className="flex items-center gap-1.5">
-        <p className="text-xs font-semibold text-[#0B3A8F] dark:text-[#9EC2FF]">Calendly</p>
+        <img src="/integrations/calendly.svg" alt="Calendly" className="w-3.5 h-3.5 object-contain" />
+        <p className="text-xs font-semibold text-zinc-800 dark:text-zinc-100">Calendly</p>
       </div>
-      <p className="text-[10px] text-[#4A90FF] mt-0.5">Create Scheduling Link</p>
+      <p className="text-[10px] text-zinc-400 mt-0.5">Create Scheduling Link</p>
       <Handle type="source" position={Position.Bottom} className="!bg-[#4A90FF] !w-3 !h-3" />
     </div>
   );
