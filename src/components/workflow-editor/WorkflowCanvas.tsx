@@ -7,6 +7,7 @@ import {
   Zap, GitBranch, Sparkles, Plug, LayoutGrid,
   Link, Clock, Play, Timer, Variable, GitFork,
   Bot, Route, FileSearch, Globe, Mail, MessageSquare,
+  Trash2, Copy, ClipboardPaste, Undo2,
 } from "lucide-react";
 import {
   ReactFlow,
@@ -52,10 +53,10 @@ const nodeTypes = {
   twilio: TwilioNode,
 };
 
-function toReactFlow(workflow: Workflow): { nodes: Node[]; edges: Edge[] } {
+function toReactFlow(workflow: Workflow, triggerType = "manual"): { nodes: Node[]; edges: Edge[] } {
   const positions = (workflow.metadata?.positions ?? {}) as Record<string, { x: number; y: number }>;
   const nodes: Node[] = [
-    { id: "trigger", type: "trigger", position: positions["trigger"] ?? { x: 250, y: 50 }, data: {} },
+    { id: "trigger", type: "trigger", position: positions["trigger"] ?? { x: 250, y: 50 }, data: { triggerType } },
   ];
   workflow.actions.forEach((action, i) => {
     nodes.push({
@@ -95,7 +96,7 @@ function toReactFlow(workflow: Workflow): { nodes: Node[]; edges: Edge[] } {
   return { nodes, edges };
 }
 
-function toInngestFormat(nodes: Node[], edges: Edge[]): Workflow {
+function toInngestFormat(nodes: Node[], edges: Edge[], workflowVariables?: { name: string; description?: string }[]): Workflow {
   const actions = nodes
     .filter(
       (n) =>
@@ -121,7 +122,9 @@ function toInngestFormat(nodes: Node[], edges: Edge[]): Workflow {
   });
   const positions: Record<string, { x: number; y: number }> = {};
   for (const n of nodes) positions[n.id] = n.position;
-  return { actions, edges: inngestEdges, metadata: { positions } };
+  const meta: Record<string, unknown> = { positions };
+  if (workflowVariables) meta.variables = workflowVariables;
+  return { actions, edges: inngestEdges, metadata: meta };
 }
 
 const LINEAR_KINDS = new Set(["linear_create_issue", "linear_update_issue"]);
@@ -136,6 +139,33 @@ const INTEGRATION_ACTIONS_BY_KIND = new Map(
   )
 );
 const DEFAULT_WORKFLOW_VARIABLES = ["name", "email", "phone"];
+
+function describeCron(expression: string): string {
+  const parts = expression.trim().split(/\s+/);
+  if (parts.length !== 5) return "Invalid — use 5 fields: minute hour day month weekday";
+  const [min, hour, dom, month, dow] = parts;
+  if (expression === "* * * * *") return "Every minute";
+  if (min !== "*" && hour !== "*" && dom === "*" && month === "*" && dow === "*") {
+    const h = hour.padStart(2, "0");
+    const m = min.padStart(2, "0");
+    return `Daily at ${h}:${m}`;
+  }
+  if (min === "0" && hour !== "*" && dom === "*" && month === "*" && dow !== "*") {
+    const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const dayNum = parseInt(dow);
+    return `Weekly on ${isNaN(dayNum) ? dow : (days[dayNum] ?? dow)} at ${hour}:00`;
+  }
+  if (min === "0" && hour === "0" && dom === "*" && month === "*" && dow === "*") {
+    return "Daily at midnight";
+  }
+  if (min !== "*" && min.startsWith("*/")) {
+    return `Every ${min.slice(2)} minutes`;
+  }
+  if (hour !== "*" && hour.startsWith("*/")) {
+    return `Every ${hour.slice(2)} hours`;
+  }
+  return expression;
+}
 
 function parseVariablesObject(value: unknown): Record<string, unknown> {
   if (!value) return {};
@@ -166,10 +196,16 @@ interface WorkflowCanvasProps {
   onSave: (workflow: Workflow) => Promise<void>;
   onRegisterSave?: (fn: () => Promise<void>) => void;
   status?: string;
+  triggerType?: string;
+  triggerConfig?: Record<string, unknown>;
+  onTriggerSave?: (type: string, config: Record<string, unknown>) => Promise<void>;
+  onPublish?: () => Promise<void>;
+  publishing?: boolean;
 }
 
 interface PaletteItem {
   kind?: string;        // maps to actionsDefinition; undefined = not wired yet
+  triggerKind?: string; // when set, clicking selects the trigger node with this type
   label: string;
   description: string;
   icon: React.ComponentType<{ size?: number; className?: string }> | string; // Lucide component OR "/" path for <img>
@@ -200,9 +236,9 @@ const PALETTE_GROUPS: PaletteGroup[] = [
     labelColor: "text-indigo-500 dark:text-indigo-400",
     iconColor: "text-indigo-500 dark:text-indigo-400",
     items: [
-      { icon: Link, label: "Webhook", description: "Start on incoming HTTP request", comingSoon: true },
-      { icon: Clock, label: "Schedule", description: "Run on a cron schedule", comingSoon: true },
-      { icon: Play, label: "Manual", description: "Trigger manually or via API", comingSoon: true },
+      { triggerKind: "webhook", icon: Link, label: "Webhook", description: "Start on incoming HTTP request" },
+      { triggerKind: "cron", icon: Clock, label: "Schedule", description: "Run on a cron schedule" },
+      { triggerKind: "manual", icon: Play, label: "Manual", description: "Trigger manually or via API" },
     ],
   },
   {
@@ -282,9 +318,10 @@ const PALETTE_GROUPS: PaletteGroup[] = [
   },
 ];
 
-function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave, status }: WorkflowCanvasProps) {
+function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave, status, triggerType: initialTriggerType, triggerConfig: initialTriggerConfig, onTriggerSave, onPublish, publishing }: WorkflowCanvasProps) {
   const { nodes: initNodes, edges: initEdges } = toReactFlow(
-    initialDefinition ?? { actions: [], edges: [] }
+    initialDefinition ?? { actions: [], edges: [] },
+    initialTriggerType ?? "manual"
   );
   const [nodes, setNodes, onNodesChange] = useNodesState(initNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initEdges);
@@ -300,6 +337,71 @@ function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave,
   const isFirstRender = useRef(true);
   const [playing, setPlaying] = useState(false);
   const [testing, setTesting] = useState(false);
+  // Trigger config state
+  const [localTriggerType, setLocalTriggerType] = useState(initialTriggerType ?? "manual");
+  const [localTriggerConfig, setLocalTriggerConfig] = useState<Record<string, unknown>>(initialTriggerConfig ?? {});
+  const [savingTrigger, setSavingTrigger] = useState(false);
+  const [triggerSaved, setTriggerSaved] = useState(false);
+
+  // Schedule (cron) picker state
+  const CRON_UNITS = [
+    { value: "m", label: "Minutes", min: 1 },
+    { value: "h", label: "Hours",   min: 1 },
+    { value: "d", label: "Days",    min: 1 },
+    { value: "w", label: "Weeks",   min: 1 },
+  ] as const;
+  type CronUnit = typeof CRON_UNITS[number]["value"];
+  const CRON_PRESETS: { label: string; amount: number; unit: CronUnit }[] = [
+    { label: "5m",  amount: 5,  unit: "m" },
+    { label: "15m", amount: 15, unit: "m" },
+    { label: "30m", amount: 30, unit: "m" },
+    { label: "1h",  amount: 1,  unit: "h" },
+    { label: "6h",  amount: 6,  unit: "h" },
+    { label: "12h", amount: 12, unit: "h" },
+    { label: "1d",  amount: 1,  unit: "d" },
+    { label: "1w",  amount: 1,  unit: "w" },
+  ];
+  function toCronExpression(amount: number, unit: CronUnit): string {
+    if (unit === "m") return `*/${amount} * * * *`;
+    if (unit === "h") return `0 */${amount} * * *`;
+    if (unit === "d") return `0 0 */${amount} * *`;
+    if (unit === "w") return `0 0 * * ${amount === 1 ? "0" : `*/${amount * 7}`}`;
+    return "* * * * *";
+  }
+  function describeSchedule(amount: number, unit: CronUnit): string {
+    const labels: Record<CronUnit, string> = { m: "minute", h: "hour", d: "day", w: "week" };
+    return `Every ${amount} ${labels[unit]}${amount !== 1 ? "s" : ""}`;
+  }
+  function parseCronConfig(cfg: Record<string, unknown>): { amount: number; unit: CronUnit } {
+    if (cfg.schedule_amount && cfg.schedule_unit) {
+      return { amount: Number(cfg.schedule_amount), unit: cfg.schedule_unit as CronUnit };
+    }
+    // Try to backfill from cron_expression
+    const expr = cfg.cron_expression as string | undefined;
+    if (expr) {
+      const everyMin = expr.match(/^\*\/(\d+) \* \* \* \*$/);
+      if (everyMin) return { amount: Number(everyMin[1]), unit: "m" };
+      const everyHour = expr.match(/^0 \*\/(\d+) \* \* \*$/);
+      if (everyHour) return { amount: Number(everyHour[1]), unit: "h" };
+      const everyDay = expr.match(/^0 0 \*\/(\d+) \* \*$/);
+      if (everyDay) return { amount: Number(everyDay[1]), unit: "d" };
+    }
+    return { amount: 5, unit: "m" };
+  }
+  const parsedCron = parseCronConfig(localTriggerConfig);
+  const [scheduleAmount, setScheduleAmountState] = useState(parsedCron.amount);
+  const [scheduleUnit, setScheduleUnitState] = useState<CronUnit>(parsedCron.unit);
+
+  function updateSchedule(amount: number, unit: CronUnit) {
+    setScheduleAmountState(amount);
+    setScheduleUnitState(unit);
+    setLocalTriggerConfig((c) => ({
+      ...c,
+      schedule_amount: amount,
+      schedule_unit: unit,
+      cron_expression: toCronExpression(amount, unit),
+    }));
+  }
   const [linearConnected, setLinearConnected] = useState<boolean | null>(null);
   const [connectingLinear, setConnectingLinear] = useState(false);
   const [linearTeams, setLinearTeams] = useState<Array<{ id: string; name: string; key: string }>>([]);
@@ -312,6 +414,22 @@ function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave,
   const idCounter = useRef(Date.now());
   const { screenToFlowPosition, fitView, setCenter } = useReactFlow();
   const canvasRef = useRef<HTMLDivElement>(null);
+
+  // Clipboard & undo
+  const [clipboard, setClipboard] = useState<{ kind: string; name: string; inputs: Record<string, unknown> } | null>(null);
+  const undoStack = useRef<Array<{ nodes: Node[]; edges: Edge[] }>>([]);
+  const cursorScreenPos = useRef<{ x: number; y: number } | null>(null);
+
+  // Workflow-level variables
+  const savedVars = (initialDefinition?.metadata as Record<string, unknown> | undefined)?.variables;
+  const [workflowVariables, setWorkflowVariables] = useState<{ name: string; description?: string }[]>(() => {
+    if (!Array.isArray(savedVars)) return DEFAULT_WORKFLOW_VARIABLES.map((name) => ({ name }));
+    // Migrate: old format was string[], new is {name,description?}[]
+    return (savedVars as unknown[]).map((v) =>
+      typeof v === "string" ? { name: v } : (v as { name: string; description?: string })
+    );
+  });
+  const [newVariableInput, setNewVariableInput] = useState("");
 
   // Custom drag state
   const [dragKind, setDragKind] = useState<string | null>(null);
@@ -369,7 +487,7 @@ function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave,
   const knownVariableNames = Array.from(
     new Set(
       [
-        ...DEFAULT_WORKFLOW_VARIABLES,
+        ...workflowVariables.map((v) => v.name),
         ...nodes
         .filter((n) => n.type === "logic" && n.data.kind === "logic_set_variables")
         .flatMap((n) => {
@@ -383,9 +501,11 @@ function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave,
   );
 
   const onConnect = useCallback(
-    (connection: Connection) =>
-      setEdges((eds) => addEdge({ ...connection, animated: true }, eds)),
-    [setEdges]
+    (connection: Connection) => {
+      undoStack.current.push({ nodes: nodes.map((n) => ({ ...n, data: { ...n.data } })), edges: edges.map((e) => ({ ...e })) });
+      setEdges((eds) => addEdge({ ...connection, animated: true }, eds));
+    },
+    [setEdges, nodes, edges]
   );
 
   function sleep(ms: number) {
@@ -541,6 +661,53 @@ function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave,
     }
   }
 
+  // Keep trigger node data in sync with localTriggerType
+  useEffect(() => {
+    setNodes((nds) =>
+      nds.map((n) => (n.id === "trigger" ? { ...n, data: { triggerType: localTriggerType } } : n))
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localTriggerType]);
+
+  async function saveTrigger() {
+    if (!onTriggerSave) return;
+    setSavingTrigger(true);
+    try {
+      await onTriggerSave(localTriggerType, localTriggerConfig);
+      setTriggerSaved(true);
+      setTimeout(() => setTriggerSaved(false), 2000);
+    } finally {
+      setSavingTrigger(false);
+    }
+  }
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable) return;
+
+      const mod = e.metaKey || e.ctrlKey;
+
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedNodeId && selectedNodeId !== "trigger") {
+        e.preventDefault();
+        deleteSelectedNode();
+      } else if (mod && e.key === "c" && selectedNodeId && selectedNodeId !== "trigger") {
+        e.preventDefault();
+        copySelectedNode();
+      } else if (mod && e.key === "v" && clipboard) {
+        e.preventDefault();
+        pasteNode();
+      } else if (mod && e.key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedNodeId, clipboard, nodes, edges]);
+
   function addAction(kind: string, position?: { x: number; y: number }) {
     const def = actionsDefinition.find((a) => a.kind === kind);
     if (!def) return;
@@ -563,13 +730,14 @@ function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave,
                 : TWILIO_KINDS.has(kind)
                   ? "twilio"
                   : "action";
+    pushUndo();
     setNodes((nds) => [
       ...nds,
       {
         id,
         type: nodeType,
         position: position ?? { x: 250, y: 180 + nonTriggerCount * 140 },
-        data: { kind, name: def.name, inputs: {} },
+        data: { kind, name: def.name, inputs: kind === "twilio_send_sms" ? { from: "+15187194315" } : {} },
       },
     ]);
   }
@@ -651,7 +819,7 @@ function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave,
                           : TWILIO_KINDS.has(newKind)
                             ? "twilio"
                             : "action",
-              data: { ...n.data, kind: newKind, name: def.name, inputs: {} },
+              data: { ...n.data, kind: newKind, name: def.name, inputs: newKind === "twilio_send_sms" ? { from: "+15187194315" } : {} },
             }
           : n
       )
@@ -704,6 +872,74 @@ function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave,
     );
   }
 
+  function pushUndo() {
+    undoStack.current.push({ nodes: nodes.map((n) => ({ ...n, data: { ...n.data } })), edges: edges.map((e) => ({ ...e })) });
+    if (undoStack.current.length > 50) undoStack.current.shift();
+  }
+
+  function undo() {
+    const snapshot = undoStack.current.pop();
+    if (!snapshot) return;
+    setNodes(snapshot.nodes);
+    setEdges(snapshot.edges);
+    setSelectedNodeId(null);
+  }
+
+  function copySelectedNode() {
+    if (!selectedNode || selectedNode.id === "trigger") return;
+    setClipboard({
+      kind: selectedNode.data.kind as string,
+      name: selectedNode.data.name as string,
+      inputs: { ...((selectedNode.data.inputs as Record<string, unknown>) ?? {}) },
+    });
+    toast.success("Copied node");
+  }
+
+  function pasteNode() {
+    if (!clipboard) return;
+    pushUndo();
+    const def = actionsDefinition.find((a) => a.kind === clipboard.kind);
+    if (!def) return;
+    const id = `action-${idCounter.current++}`;
+    const nonTriggerCount = nodes.filter(
+      (n) => n.type !== "trigger"
+    ).length;
+    const nodeType = LOGIC_KINDS.has(clipboard.kind)
+      ? "logic"
+      : LINEAR_KINDS.has(clipboard.kind)
+        ? "linear"
+        : CALENDLY_KINDS.has(clipboard.kind)
+          ? "calendly"
+          : GMAIL_KINDS.has(clipboard.kind)
+            ? "gmail"
+            : SLACK_KINDS.has(clipboard.kind)
+              ? "slack"
+              : SENDGRID_KINDS.has(clipboard.kind)
+                ? "sendgrid"
+                : TWILIO_KINDS.has(clipboard.kind)
+                  ? "twilio"
+                  : "action";
+    const position = cursorScreenPos.current
+      ? screenToFlowPosition(cursorScreenPos.current)
+      : { x: 300, y: 180 + nonTriggerCount * 140 };
+    setNodes((nds) => [
+      ...nds,
+      {
+        id,
+        type: nodeType,
+        position,
+        data: { kind: clipboard.kind, name: clipboard.name, inputs: { ...clipboard.inputs } },
+      },
+    ]);
+    toast.success("Pasted node");
+  }
+
+  function deleteSelectedNode() {
+    if (!selectedNodeId || selectedNodeId === "trigger") return;
+    pushUndo();
+    removeNode(selectedNodeId);
+  }
+
   function removeNode(nodeId: string) {
     setNodes((nds) => nds.filter((n) => n.id !== nodeId));
     setEdges((eds) => eds.filter((e) => e.source !== nodeId && e.target !== nodeId));
@@ -714,7 +950,7 @@ function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave,
     setSaving(true);
     setSaveError(false);
     try {
-      await onSave(toInngestFormat(nodes, edges));
+      await onSave(toInngestFormat(nodes, edges, workflowVariables));
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch {
@@ -978,14 +1214,23 @@ function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave,
         {/* Canvas */}
         <div className="flex-1 relative">
           {/* Floating controls */}
-          <div className="absolute top-4 z-10 right-4 flex items-center gap-2">
+          <div className="absolute top-4 z-10 right-4 flex items-center gap-1.5">
             <button
               onClick={playWorkflow}
               disabled={playing}
               className="px-4 py-1.5 backdrop-blur-md rounded-xl text-sm font-medium shadow-lg border transition-colors disabled:opacity-50 bg-emerald-600/90 text-white border-emerald-500/30 hover:bg-emerald-700"
             >
-              {playing ? "Running..." : "Play"}
+              {playing ? "Running..." : "Test"}
             </button>
+            {onPublish && (
+              <button
+                onClick={onPublish}
+                disabled={publishing}
+                className="px-3.5 py-1.5 backdrop-blur-md rounded-xl text-sm font-semibold shadow-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed bg-zinc-900 dark:bg-zinc-100 hover:bg-zinc-700 dark:hover:bg-zinc-300 text-white dark:text-zinc-900 border-zinc-800/20 dark:border-zinc-200/20"
+              >
+                {publishing ? "Publishing…" : "Publish"}
+              </button>
+            )}
           </div>
 
           {/* Status badge — bottom right */}
@@ -1064,15 +1309,24 @@ function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave,
                   <div className="space-y-0.5">
                     {group.items.map((item) => (
                       <button
-                        key={item.kind ?? item.label}
+                        key={item.triggerKind ?? item.kind ?? item.label}
                         disabled={item.comingSoon}
                         onMouseDown={(e) => {
-                          if (item.kind && !item.comingSoon) startDrag(e, item.kind);
+                          if (item.triggerKind) {
+                            // Trigger items: select trigger node + set type
+                            setLocalTriggerType(item.triggerKind);
+                            setSelectedNodeId("trigger");
+                            setActiveGroup(null);
+                          } else if (item.kind && !item.comingSoon) {
+                            startDrag(e, item.kind);
+                          }
                         }}
                         className={`w-full text-left px-2.5 py-2 rounded-lg flex items-center gap-2.5 transition-colors select-none ${
                           item.comingSoon
                             ? "opacity-45 cursor-not-allowed"
-                            : "hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-grab"
+                            : item.triggerKind
+                              ? "hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
+                              : "hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-grab"
                         }`}
                       >
                         <span className="w-7 h-7 rounded-md flex items-center justify-center text-sm shrink-0">
@@ -1138,12 +1392,237 @@ function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave,
               setSelectedNodeId(node.id === selectedNodeId ? null : node.id)
             }
             onPaneClick={() => setSelectedNodeId(null)}
+            onMouseMove={(e) => { cursorScreenPos.current = { x: e.clientX, y: e.clientY }; }}
             nodeTypes={nodeTypes}
             fitView
           >
             <Background />
             <Controls />
           </ReactFlow>
+
+          {/* Trigger config panel */}
+          <div
+            className={`absolute inset-y-4 right-4 z-20 w-80 flex flex-col bg-white dark:bg-zinc-900 rounded-2xl shadow-2xl border border-zinc-200 dark:border-zinc-700 transition-all duration-300 ease-in-out ${
+              selectedNodeId === "trigger" ? "translate-x-0 opacity-100" : "translate-x-[calc(100%+1rem)] opacity-0 pointer-events-none"
+            }`}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-100 dark:border-zinc-800">
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Trigger</h3>
+              <button
+                onClick={() => setSelectedNodeId(null)}
+                className="text-zinc-400 hover:text-zinc-600 text-xl leading-none"
+              >
+                ×
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5">
+              {/* Trigger type selector */}
+              <div>
+                <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1.5">Trigger type</label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {([
+                    { value: "manual", label: "Manual", icon: "▶" },
+                    { value: "webhook", label: "Webhook", icon: "🔗" },
+                    { value: "cron", label: "Schedule", icon: "⏱" },
+                  ] as const).map((opt) => (
+                    <button
+                      key={opt.value}
+                      onClick={() => setLocalTriggerType(opt.value)}
+                      className={`flex flex-col items-center gap-1 py-2.5 px-1 rounded-xl border text-xs font-medium transition-all ${
+                        localTriggerType === opt.value
+                          ? "border-indigo-500 bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300"
+                          : "border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400 hover:border-zinc-300 dark:hover:border-zinc-600"
+                      }`}
+                    >
+                      <span className="text-base leading-none">{opt.icon}</span>
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Manual */}
+              {localTriggerType === "manual" && (
+                <div className="space-y-3">
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                    This workflow runs when triggered manually via the <span className="font-mono bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded text-[10px]">Test</span> button, the API, or a downstream action.
+                  </p>
+                  <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 px-3 py-2.5 space-y-1">
+                    <p className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wide">API endpoint</p>
+                    <p className="text-[11px] font-mono text-zinc-700 dark:text-zinc-300 break-all">
+                      POST /api/workflows/{workflowId}/execute
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Webhook */}
+              {localTriggerType === "webhook" && (
+                <div className="space-y-3">
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                    Send an HTTP POST to the URL below to trigger this workflow. The request body is available as <span className="font-mono bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded text-[10px]">{"{{event.data.data}}"}</span>.
+                  </p>
+                  <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 px-3 py-2.5 space-y-1.5">
+                    <p className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wide">Webhook URL</p>
+                    <p className="text-[11px] font-mono text-zinc-700 dark:text-zinc-300 break-all leading-relaxed">
+                      {typeof window !== "undefined" ? window.location.origin : ""}/api/webhooks/{workflowId}
+                    </p>
+                    <button
+                      onClick={() => {
+                        const url = `${window.location.origin}/api/webhooks/${workflowId}`;
+                        navigator.clipboard.writeText(url).then(() => toast.success("URL copied"));
+                      }}
+                      className="text-[10px] text-indigo-500 hover:text-indigo-700 font-medium"
+                    >
+                      Copy URL
+                    </button>
+                  </div>
+                  <div className="rounded-xl bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 px-3 py-2.5">
+                    <p className="text-[10px] text-amber-700 dark:text-amber-300 leading-relaxed">
+                      The workflow must be <span className="font-semibold">Active</span> to receive webhook requests.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Cron */}
+              {localTriggerType === "cron" && (
+                <div className="space-y-4">
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                    Runs automatically on a schedule. The workflow must be <span className="font-semibold">Active</span> to execute.
+                  </p>
+
+                  {/* Amount + unit row */}
+                  <div className="flex gap-2">
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={scheduleAmount}
+                      onChange={(e) => {
+                        const n = Math.max(1, parseInt(e.target.value) || 1);
+                        updateSchedule(n, scheduleUnit);
+                      }}
+                      className="w-20 text-sm border border-zinc-200 dark:border-zinc-700 rounded-xl px-3 py-2 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                    />
+                    <select
+                      value={scheduleUnit}
+                      onChange={(e) => updateSchedule(scheduleAmount, e.target.value as CronUnit)}
+                      className="flex-1 text-sm border border-zinc-200 dark:border-zinc-700 rounded-xl px-3 py-2 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-400 appearance-none"
+                    >
+                      {CRON_UNITS.map((u) => (
+                        <option key={u.value} value={u.value}>{u.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Summary */}
+                  <p className="text-[11px] text-indigo-600 dark:text-indigo-400 font-medium">
+                    ⏱ <span className="font-semibold">{describeSchedule(scheduleAmount, scheduleUnit)}</span>
+                  </p>
+
+                  {/* Quick presets */}
+                  <div>
+                    <p className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wide mb-2">Quick presets</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {CRON_PRESETS.map((p) => {
+                        const active = scheduleAmount === p.amount && scheduleUnit === p.unit;
+                        return (
+                          <button
+                            key={p.label}
+                            onClick={() => updateSchedule(p.amount, p.unit)}
+                            className={`px-2.5 py-1 rounded-xl text-xs font-medium border transition-all ${
+                              active
+                                ? "bg-indigo-100 dark:bg-indigo-900 border-indigo-400 text-indigo-700 dark:text-indigo-300"
+                                : "border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-400 hover:border-zinc-300 dark:hover:border-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                            }`}
+                          >
+                            {p.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Generated cron */}
+                  <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 px-3 py-2">
+                    <p className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wide mb-0.5">Cron expression</p>
+                    <p className="text-[11px] font-mono text-zinc-600 dark:text-zinc-300">
+                      {toCronExpression(scheduleAmount, scheduleUnit)}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Variables section */}
+            <div className="px-4 py-4 border-t border-zinc-100 dark:border-zinc-800">
+              <p className="text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1">Variables</p>
+              <p className="text-[10px] text-zinc-400 mb-3">Named variables available to all steps in this workflow</p>
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                {workflowVariables.map((v) => (
+                  <span
+                    key={v.name}
+                    className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-xs text-zinc-700 dark:text-zinc-300"
+                    title={v.description}
+                  >
+                    {v.name}
+                    <button
+                      onClick={() => setWorkflowVariables((prev) => prev.filter((x) => x.name !== v.name))}
+                      className="text-zinc-400 hover:text-red-500 transition-colors leading-none ml-0.5"
+                      title={`Remove ${v.name}`}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+                {workflowVariables.length === 0 && (
+                  <p className="text-[10px] text-zinc-400 italic">No variables defined</p>
+                )}
+              </div>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const name = newVariableInput.trim().replace(/\s+/g, "_");
+                  if (!name || workflowVariables.some((v) => v.name === name)) return;
+                  setWorkflowVariables((prev) => [...prev, { name }]);
+                  setNewVariableInput("");
+                }}
+                className="flex gap-2"
+              >
+                <input
+                  type="text"
+                  value={newVariableInput}
+                  onChange={(e) => setNewVariableInput(e.target.value)}
+                  placeholder="New variable name"
+                  className="flex-1 px-2.5 py-1.5 text-xs rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                />
+                <button
+                  type="submit"
+                  disabled={!newVariableInput.trim()}
+                  className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40 transition-colors"
+                >
+                  Add
+                </button>
+              </form>
+            </div>
+
+            {onTriggerSave && (
+              <div className="px-4 py-3 border-t border-zinc-100 dark:border-zinc-800">
+                <button
+                  onClick={saveTrigger}
+                  disabled={savingTrigger}
+                  className={`w-full px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50 ${
+                    triggerSaved
+                      ? "bg-emerald-500 text-white"
+                      : "bg-indigo-600 text-white hover:bg-indigo-700"
+                  }`}
+                >
+                  {savingTrigger ? "Saving…" : triggerSaved ? "✓ Saved" : "Save trigger"}
+                </button>
+              </div>
+            )}
+          </div>
 
           {/* Floating config panel */}
           <div
@@ -1297,12 +1776,19 @@ function Canvas({ workflowId, teamId, initialDefinition, onSave, onRegisterSave,
                         inputValue={inputValue}
                         suggestions={knownVariableNames}
                         onChange={(next) => updateSetVariablesInput(panelNode.id, next)}
+                        onAddVariable={(name, description) => setWorkflowVariables((prev) => prev.some((v) => v.name === name) ? prev : [...prev, { name, description }])}
                       />
                     );
                   })() : panelNode.data.kind === "builtin:if" ? (
                     <ConditionPanel
                       value={((panelNode.data.inputs as Record<string, unknown>)?.condition ?? "") as string}
                       onChange={(v) => updateInput(panelNode.id, "condition", v)}
+                      variables={knownVariableNames}
+                      onAddVariable={(name) =>
+                        setWorkflowVariables((prev) =>
+                          prev.some((v) => v.name === name) ? prev : [...prev, { name }]
+                        )
+                      }
                     />
                   ) : Object.entries(panelAction.inputs ?? {}).map(([key, input]) => {
                     const inputDef = input as {

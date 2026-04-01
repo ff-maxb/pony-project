@@ -29,6 +29,13 @@ export async function GET(
       .eq("execution_id", executionId)
       .order("started_at", { ascending: true });
 
+    // Get execution logs
+    const { data: logs } = await db
+      .from("execution_logs")
+      .select("id, level, message, data, created_at")
+      .eq("execution_id", executionId)
+      .order("created_at", { ascending: true });
+
     // Get workflow version definition for rendering
     const { data: version } = await db
       .from("workflow_versions")
@@ -39,6 +46,7 @@ export async function GET(
     return jsonResponse({
       ...execution,
       steps: steps ?? [],
+      logs: logs ?? [],
       version,
     });
   } catch {

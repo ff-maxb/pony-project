@@ -19,14 +19,26 @@ export async function GET(
     if (error || !workflow) return errorResponse("Workflow not found", 404);
     await verifyTeamMembership(userId, workflow.team_id);
 
-    // Get latest version
-    const { data: version } = await db
-      .from("workflow_versions")
-      .select("*")
-      .eq("workflow_id", workflowId)
-      .order("version_number", { ascending: false })
-      .limit(1)
-      .single();
+    // Use current_version_id if set, otherwise fall back to highest version_number
+    let version = null;
+    if (workflow.current_version_id) {
+      const { data: v } = await db
+        .from("workflow_versions")
+        .select("*")
+        .eq("id", workflow.current_version_id)
+        .single();
+      version = v;
+    }
+    if (!version) {
+      const { data: v } = await db
+        .from("workflow_versions")
+        .select("*")
+        .eq("workflow_id", workflowId)
+        .order("version_number", { ascending: false })
+        .limit(1)
+        .single();
+      version = v;
+    }
 
     return jsonResponse({ ...workflow, latest_version: version });
   } catch {
@@ -67,6 +79,30 @@ export async function PUT(
       .single();
 
     if (error) return errorResponse(error.message, 500);
+
+    // When activating, stamp published_at on the latest saved version and set it as current
+    if (body.status === "active") {
+      const { data: latest } = await db
+        .from("workflow_versions")
+        .select("id")
+        .eq("workflow_id", workflowId)
+        .order("version_number", { ascending: false })
+        .limit(1)
+        .single();
+      if (latest) {
+        const now = new Date().toISOString();
+        await db
+          .from("workflow_versions")
+          .update({ published_at: now })
+          .eq("id", latest.id)
+          .is("published_at", null); // only stamp once
+        await db
+          .from("workflows")
+          .update({ current_version_id: latest.id })
+          .eq("id", workflowId);
+      }
+    }
+
     return jsonResponse(data);
   } catch {
     return errorResponse("Unauthorized", 401);

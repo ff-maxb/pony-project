@@ -250,12 +250,19 @@ export async function executeSendGridSendEmail(config: {
   if (!apiKey) throw new Error("Missing SENDGRID_API_KEY environment variable");
   sgMail.default.setApiKey(apiKey);
 
-  const [response] = await sgMail.default.send({
-    to: config.to,
-    from: config.from,
-    subject: config.subject,
-    html: config.body,
-  });
+  let response: Awaited<ReturnType<typeof sgMail.default.send>>[0];
+  try {
+    [response] = await sgMail.default.send({
+      to: config.to,
+      from: config.from,
+      subject: config.subject,
+      html: config.body,
+    });
+  } catch (err: unknown) {
+    const sgErr = err as { response?: { body?: { errors?: { message: string }[] } }; message?: string };
+    const details = sgErr?.response?.body?.errors?.map((e) => e.message).join("; ");
+    throw new Error(details ?? sgErr?.message ?? "SendGrid request failed");
+  }
 
   return { statusCode: response.statusCode, messageId: response.headers["x-message-id"] };
 }

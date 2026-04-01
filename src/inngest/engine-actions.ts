@@ -1,5 +1,7 @@
 import type { EngineAction } from "@inngest/workflow-kit";
+import * as jsonLogic from "json-logic-js";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { createExecutionLogger } from "@/lib/execution-logger";
 import {
   executeSlackSendMessage,
   executeGmailSendEmail,
@@ -181,29 +183,79 @@ export const engineActions: EngineAction[] = [
     ...actionsDefinition[5], // builtin:if
     handler: async ({ event, step, workflowAction }) => {
       const { executionId } = event.data as { executionId: string };
-      const result = await step.run(`action-${workflowAction.id}-condition`, async () => {
-        const conditionStr = String(workflowAction.inputs?.condition ?? "");
-        if (!conditionStr.trim()) return { result: true };
-        try {
-          const condition = JSON.parse(conditionStr) as unknown;
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const jsonLogic = require("json-logic-js") as { apply: (logic: unknown, data?: unknown) => unknown };
-          const result = jsonLogic.apply(condition);
-          return { result: !!result };
-        } catch {
-          throw new Error("Invalid condition JSON: " + conditionStr);
-        }
-      });
 
-      const db = createAdminClient();
-      await db.from("execution_steps").insert({
-        execution_id: executionId,
-        node_id: workflowAction.id,
-        step_name: workflowAction.name ?? "If / Condition",
-        status: "completed",
-        output_data: result as Record<string, unknown>,
-        started_at: new Date().toISOString(),
-        completed_at: new Date().toISOString(),
+      const result = await step.run(`action-${workflowAction.id}-condition`, async () => {
+        const db = createAdminClient();
+        const log = createExecutionLogger(executionId);
+        const conditionRaw = workflowAction.inputs?.condition;
+        // Treat missing / null / non-string condition as "always true"
+        const conditionStr =
+          conditionRaw == null || conditionRaw === "undefined"
+            ? ""
+            : String(conditionRaw).trim();
+
+        log.info(`Evaluating condition`, { nodeId: workflowAction.id, conditionStr });
+
+        if (!conditionStr) {
+          log.info(`No condition set — defaulting to true`, { nodeId: workflowAction.id });
+          await db.from("execution_steps").insert({
+            execution_id: executionId,
+            node_id: workflowAction.id,
+            step_name: workflowAction.name ?? "If / Condition",
+            status: "completed",
+            output_data: { result: true, note: "no condition set" },
+            started_at: new Date().toISOString(),
+            completed_at: new Date().toISOString(),
+          });
+          return { result: true };
+        }
+
+        const vars = (workflowAction.inputs?._vars ?? {}) as Record<string, unknown>;
+        log.info(`Condition vars`, { nodeId: workflowAction.id, vars });
+
+        // Transform !ref($.path) strings → json-logic {"var": "path"} references
+        const transformRefs = (obj: unknown): unknown => {
+          if (typeof obj === "string") {
+            const m = obj.match(/^!ref\(\$\.(.+)\)$/);
+            if (m) return { var: m[1] };
+            return obj;
+          }
+          if (Array.isArray(obj)) return obj.map(transformRefs);
+          if (obj && typeof obj === "object") {
+            const out: Record<string, unknown> = {};
+            for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+              out[k] = transformRefs(v);
+            }
+            return out;
+          }
+          return obj;
+        };
+
+        let raw: unknown;
+        try {
+          raw = JSON.parse(conditionStr);
+        } catch (parseErr) {
+          const msg = `Invalid condition JSON: ${conditionStr}`;
+          log.error(msg, { nodeId: workflowAction.id, parseError: String(parseErr) });
+          throw new Error(msg);
+        }
+
+        const logic = transformRefs(raw) as Parameters<typeof jsonLogic.apply>[0];
+        const evalResult = jsonLogic.apply(logic, { vars });
+        const stepResult = { result: !!evalResult };
+        log.info(`Condition result`, { nodeId: workflowAction.id, logic, evalResult, result: stepResult.result });
+
+        await db.from("execution_steps").insert({
+          execution_id: executionId,
+          node_id: workflowAction.id,
+          step_name: workflowAction.name ?? "If / Condition",
+          status: "completed",
+          output_data: stepResult,
+          started_at: new Date().toISOString(),
+          completed_at: new Date().toISOString(),
+        });
+
+        return stepResult;
       });
 
       return result;

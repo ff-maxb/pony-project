@@ -21,7 +21,11 @@ export async function POST(
     await verifyTeamMembership(userId, workflow.team_id);
 
     if (workflow.status === "paused") {
-      return errorResponse("Workflow is paused", 400);
+      const isPlayMode = request.headers.get("x-play-mode") === "1" ||
+        new URL(request.url).searchParams.get("playMode") === "1";
+      if (!isPlayMode) {
+        return errorResponse("Workflow is paused", 400);
+      }
     }
 
     if (!process.env.INNGEST_EVENT_KEY) {
@@ -79,7 +83,8 @@ export async function POST(
         .from("workflow_executions")
         .update({ status: "failed", completed_at: new Date().toISOString(), error: errorMsg })
         .eq("id", execution.id);
-      throw err;
+      // Return executionId so the client can poll and display the failure
+      return jsonResponse({ executionId: execution.id }, 201);
     }
 
     return jsonResponse({ executionId: execution.id }, 201);

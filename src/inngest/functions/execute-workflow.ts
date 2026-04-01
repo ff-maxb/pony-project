@@ -1,6 +1,7 @@
 import { inngest } from "../client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { engineActions } from "../engine-actions";
+import { createExecutionLogger, type ExecutionLogger } from "@/lib/execution-logger";
 
 type Workflow = {
   actions: Array<{ id: string; kind: string; name?: string; inputs?: Record<string, unknown> }>;
@@ -15,7 +16,9 @@ async function runWorkflow(args: {
   event: { data: Record<string, unknown> };
   step: unknown;
   workflow: Workflow;
+  logger: ExecutionLogger;
 }) {
+  const log = args.logger;
   const actionById = new Map(args.workflow.actions.map((a) => [a.id, a]));
   const actionsByKind = new Map(engineActions.map((a) => [a.kind, a]));
   const outgoing = new Map<string, Workflow["edges"]>();
@@ -28,11 +31,9 @@ async function runWorkflow(args: {
 
   const outputs = new Map<string, unknown>();
   const eventData = args.event?.data ?? {};
-  const variables: Record<string, unknown> = {
-    name: eventData.name,
-    email: eventData.email,
-    phone: eventData.phone,
-  };
+  const triggerData = (eventData.triggerData as Record<string, unknown>) ?? {};
+  // Initialize variables from trigger data (workflow variables set by the trigger)
+  const variables: Record<string, unknown> = { ...triggerData };
   const executed = new Set<string>();
   const queue: string[] = ["$source"];
 
@@ -126,17 +127,36 @@ async function runWorkflow(args: {
     const edges = outgoing.get(from) ?? [];
     const sourceOutput = from === "$source" ? { result: true } : outputs.get(from);
 
+    log.info(`Processing node "${from}"`, { edges: edges.length, sourceOutput });
+
     for (const edge of edges) {
-      if (!edgePasses(edge, sourceOutput)) continue;
+      const passes = edgePasses(edge, sourceOutput);
+      log.info(`Edge ${edge.from} → ${edge.to} (${passes ? "passes" : "skipped"})`, { conditional: edge.conditional ?? null });
+      if (!passes) continue;
       const action = actionById.get(edge.to);
       if (!action || executed.has(action.id)) continue;
 
       const actionDef = actionsByKind.get(action.kind);
       if (!actionDef) throw new Error(`Unknown action kind: ${action.kind}`);
 
+      // For builtin:if, keep the raw condition string (interpolating it inline
+      // into JSON produces invalid JSON for non-empty values) and inject the
+      // current runtime variables so the handler can evaluate refs correctly.
+      const resolvedInputs = action.kind === "builtin:if"
+        ? { condition: action.inputs?.condition, _vars: { ...variables } }
+        : ((resolveInputs(action.inputs ?? {}) as Record<string, unknown>) ?? {});
+
+      log.info(`Executing action "${action.name ?? action.kind}"`, {
+        kind: action.kind,
+        nodeId: action.id,
+        inputs: action.kind === "builtin:if"
+          ? { condition: resolvedInputs.condition, vars_keys: Object.keys((resolvedInputs._vars as object) ?? {}) }
+          : resolvedInputs,
+      });
+
       const workflowAction = {
         ...action,
-        inputs: (resolveInputs(action.inputs ?? {}) as Record<string, unknown>) ?? {},
+        inputs: resolvedInputs,
       };
 
       const result = await (actionDef.handler as (handlerArgs: {
@@ -153,8 +173,11 @@ async function runWorkflow(args: {
         state: outputs,
       });
 
+      log.info(`Action "${action.name ?? action.kind}" completed`, { kind: action.kind, nodeId: action.id, result });
+
         if (action.kind === "logic_set_variables" && result && typeof result === "object" && !Array.isArray(result)) {
           Object.assign(variables, result as Record<string, unknown>);
+          log.info("Variables updated", { variables });
         }
 
       outputs.set(action.id, result);
@@ -205,13 +228,18 @@ export const executeWorkflow = inngest.createFunction(
       return data.definition as Workflow;
     });
 
+    const logger = createExecutionLogger(executionId);
+
     try {
       // Run the workflow via our action graph executor.
+      logger.info("Workflow started");
       await runWorkflow({
         event: event as { data: Record<string, unknown> },
         step,
         workflow,
+        logger,
       });
+      logger.info("Workflow completed");
 
       // Mark execution completed
       await step.run("mark-execution-completed", async () => {
@@ -223,13 +251,19 @@ export const executeWorkflow = inngest.createFunction(
 
       return { executionId, status: "completed" };
     } catch (err) {
-      await step.run("mark-execution-failed", async () => {
-        const errorMsg = err instanceof Error ? err.message : String(err);
+      // NOTE: Do NOT call step.run() inside this catch block — doing so while
+      // rethrowing corrupts Inngest's step state machine and causes the function
+      // to get permanently stuck. Update the DB directly instead.
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      logger.error("Workflow failed", { error: errorMsg });
+      try {
         await db
           .from("workflow_executions")
           .update({ status: "failed", completed_at: new Date().toISOString(), error: errorMsg })
           .eq("id", executionId);
-      });
+      } catch (dbErr) {
+        console.error(`[execute-workflow] failed to mark execution as failed in DB`, dbErr);
+      }
       throw err;
     }
   }

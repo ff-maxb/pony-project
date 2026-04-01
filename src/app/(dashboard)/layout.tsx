@@ -10,7 +10,7 @@ export default function DashboardLayout({
       <div className="pointer-events-none absolute inset-0 landing-gradient opacity-80" />
       <Sidebar />
       <div className="relative z-10 flex flex-1 flex-col overflow-hidden">
-        <main className="flex-1 overflow-auto px-6 pb-6 sm:px-8 sm:pb-8">
+        <main className="flex-1 min-h-0 overflow-auto px-6 pb-6 sm:px-8 sm:pb-8">
           {children}
         </main>
       </div>

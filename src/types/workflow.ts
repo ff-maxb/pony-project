@@ -34,6 +34,10 @@ export interface Workflow {
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
+  /** Points to the currently live/published version */
+  current_version_id: string | null;
+  /** Joined by the API — not a DB column */
+  latest_version?: WorkflowVersion;
 }
 
 export interface WorkflowVersion {
@@ -43,6 +47,7 @@ export interface WorkflowVersion {
   definition: WorkflowDefinition;
   created_by: string;
   created_at: string;
+  published_at: string | null;
 }
 
 export interface WorkflowExecution {

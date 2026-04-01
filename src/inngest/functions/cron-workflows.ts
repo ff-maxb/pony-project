@@ -6,7 +6,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
  * and dispatches execution events for those whose cron matches.
  */
 export const cronTriggerCheck = inngest.createFunction(
-  { id: "cron-trigger-check", triggers: [{ cron: "* * * * *" }] },
+  { id: "cron-trigger-check", triggers: [{ cron: "0 * * * *" }] },
   async ({ step }) => {
     const db = createAdminClient();
 

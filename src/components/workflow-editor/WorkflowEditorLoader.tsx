@@ -5,14 +5,14 @@ import { toast } from "sonner";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import type { Workflow } from "@inngest/workflow-kit";
-import type { Workflow as WorkflowRecord, WorkflowExecution } from "@/types/workflow";
+import type { Workflow as WorkflowRecord, WorkflowExecution, WorkflowVersion } from "@/types/workflow";
 
-type Tab = "builder" | "enrollment" | "logs";
+type Tab = "builder" | "logs" | "versions";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "builder", label: "Builder" },
-  { id: "enrollment", label: "Enrollment History" },
   { id: "logs", label: "Execution Logs" },
+  { id: "versions", label: "Versions" },
 ];
 
 /**
@@ -77,8 +77,11 @@ export function WorkflowEditorLoader({ workflowId }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>("builder");
   const [executions, setExecutions] = useState<WorkflowExecution[]>([]);
   const [execLoading, setExecLoading] = useState(false);
+  const [versions, setVersions] = useState<WorkflowVersion[]>([]);
+  const [versionsLoading, setVersionsLoading] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameValue, setNameValue] = useState("");
+  const [publishing, setPublishing] = useState(false);
   const nameInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -101,7 +104,7 @@ export function WorkflowEditorLoader({ workflowId }: Props) {
   }, [workflowId]);
 
   useEffect(() => {
-    if (activeTab !== "enrollment" && activeTab !== "logs") return;
+    if (activeTab !== "logs") return;
     setExecLoading(true);
     fetch(`/api/workflows/${workflowId}/executions?limit=50`)
       .then((r) => r.json())
@@ -109,6 +112,42 @@ export function WorkflowEditorLoader({ workflowId }: Props) {
       .catch(() => setExecutions([]))
       .finally(() => setExecLoading(false));
   }, [activeTab, workflowId]);
+
+  useEffect(() => {
+    if (activeTab !== "versions") return;
+    setVersionsLoading(true);
+    fetch(`/api/workflows/${workflowId}/versions`)
+      .then((r) => r.json())
+      .then((data) => setVersions(Array.isArray(data) ? data : []))
+      .catch(() => setVersions([]))
+      .finally(() => setVersionsLoading(false));
+  }, [activeTab, workflowId]);
+
+  async function handleRollback(versionId: string) {
+    try {
+      const res = await fetch(`/api/workflows/${workflowId}/versions/${versionId}/rollback`, {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error("Rollback failed");
+      const rolledBack = await res.json();
+      toast.success(`Rolled back to v${rolledBack.version_number}`);
+      // Reload workflow record (current_version_id changed) and versions list
+      const [wfRes, vRes] = await Promise.all([
+        fetch(`/api/workflows/${workflowId}`),
+        fetch(`/api/workflows/${workflowId}/versions`),
+      ]);
+      if (wfRes.ok) {
+        const wfData = await wfRes.json();
+        setWorkflowRecord(wfData);
+        if (wfData.latest_version?.definition) {
+          setDefinition(toInngestWorkflow(wfData.latest_version.definition));
+        }
+      }
+      if (vRes.ok) setVersions(await vRes.json());
+    } catch {
+      toast.error("Failed to rollback workflow");
+    }
+  }
 
   async function handleSave(workflow: Workflow) {
     const res = await fetch(`/api/workflows/${workflowId}/definition`, {
@@ -137,7 +176,19 @@ export function WorkflowEditorLoader({ workflowId }: Props) {
     await handleSettingsSave({ name: nameValue.trim() });
   }
 
-  async function handleSettingsSave(updates: { name?: string; description?: string; status?: string }) {
+  async function handlePublish() {
+    setPublishing(true);
+    try {
+      await handleSettingsSave({ status: "active" });
+      toast.success("Workflow published");
+    } catch {
+      toast.error("Failed to publish workflow");
+    } finally {
+      setPublishing(false);
+    }
+  }
+
+  async function handleSettingsSave(updates: { name?: string; description?: string; status?: string; trigger_type?: string; trigger_config?: Record<string, unknown> }) {
     await fetch(`/api/workflows/${workflowId}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -204,24 +255,7 @@ export function WorkflowEditorLoader({ workflowId }: Props) {
         </div>
 
         {/* Floating tab bar — top-center */}
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 px-2 py-1.5 bg-white/90 dark:bg-zinc-900/90 backdrop-blur-md rounded-2xl shadow-xl border border-zinc-200/80 dark:border-zinc-700/80 pointer-events-auto">
-          {TABS.map((tab) => {
-            const isActive = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`px-3 py-1.5 rounded-xl text-sm font-medium transition-all ${
-                  isActive
-                    ? "bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 shadow-sm"
-                    : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-                }`}
-              >
-                {tab.label}
-              </button>
-            );
-          })}
-        </div>
+        <TabBar activeTab={activeTab} onTabChange={setActiveTab} />
 
         {/* Builder — always mounted so auto-save timer is never lost */}
         <div className={activeTab === "builder" ? "h-full" : "hidden"}>
@@ -231,20 +265,15 @@ export function WorkflowEditorLoader({ workflowId }: Props) {
             initialDefinition={definition ?? undefined}
             onSave={handleSave}
             status={workflowRecord?.status}
+            triggerType={workflowRecord?.trigger_type ?? "manual"}
+            triggerConfig={(workflowRecord?.trigger_config as unknown as Record<string, unknown>) ?? {}}
+            onTriggerSave={async (type, config) => {
+              await handleSettingsSave({ trigger_type: type, trigger_config: config });
+            }}
+            onPublish={handlePublish}
+            publishing={publishing}
           />
         </div>
-        {/* Enrollment History */}
-        {activeTab === "enrollment" && (
-          <ExecutionsTab
-            executions={executions}
-            loading={execLoading}
-            workflowId={workflowId}
-            statusColors={execStatusColors}
-            title="Enrollment History"
-            emptyText="No enrollments yet."
-          />
-        )}
-
         {/* Execution Logs */}
         {activeTab === "logs" && (
           <ExecutionsTab
@@ -258,8 +287,184 @@ export function WorkflowEditorLoader({ workflowId }: Props) {
           />
         )}
 
+        {/* Versions */}
+        {activeTab === "versions" && (
+          <VersionsTab
+            versions={versions}
+            loading={versionsLoading}
+            currentVersionId={workflowRecord?.current_version_id ?? undefined}
+            isActive={workflowRecord?.status === "active"}
+            onRollback={handleRollback}
+          />
+        )}
 
       </div>
+    </div>
+  );
+}
+
+// ─── Tab bar with sliding pill ───────────────────────────────────────────────
+
+function TabBar({ activeTab, onTabChange }: { activeTab: Tab; onTabChange: (tab: Tab) => void }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const [pill, setPill] = useState<{ left: number; width: number } | null>(null);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    const el = tabRefs.current[activeTab];
+    const container = containerRef.current;
+    if (!el || !container) return;
+    const containerRect = container.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    setPill({ left: elRect.left - containerRect.left, width: elRect.width });
+    setReady(true);
+  }, [activeTab]);
+
+  return (
+    <div
+      ref={containerRef}
+      className="absolute top-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 px-2 py-1.5 bg-white/90 dark:bg-zinc-900/90 backdrop-blur-md rounded-2xl shadow-xl border border-zinc-200/80 dark:border-zinc-700/80 pointer-events-auto"
+      style={{ position: "absolute" }}
+    >
+      {/* Sliding pill */}
+      {ready && pill && (
+        <span
+          className="absolute top-1.5 bottom-1.5 rounded-xl bg-zinc-900 dark:bg-zinc-100 shadow-sm pointer-events-none"
+          style={{
+            left: pill.left,
+            width: pill.width,
+            transition: "left 200ms cubic-bezier(0.4,0,0.2,1), width 200ms cubic-bezier(0.4,0,0.2,1)",
+          }}
+        />
+      )}
+      {TABS.map((tab) => {
+        const isActive = activeTab === tab.id;
+        return (
+          <button
+            key={tab.id}
+            ref={(el) => { tabRefs.current[tab.id] = el; }}
+            onClick={() => onTabChange(tab.id)}
+            className={`relative px-3 py-1.5 rounded-xl text-sm font-medium transition-colors ${
+              isActive
+                ? "text-white dark:text-zinc-900"
+                : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200"
+            }`}
+          >
+            {tab.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Versions tab ────────────────────────────────────────────────────────────
+
+function VersionsTab({
+  versions,
+  loading,
+  currentVersionId,
+  isActive,
+  onRollback,
+}: {
+  versions: WorkflowVersion[];
+  loading: boolean;
+  currentVersionId?: string;
+  isActive: boolean;
+  onRollback: (versionId: string) => Promise<void>;
+}) {
+  const [rollingBack, setRollingBack] = useState<string | null>(null);
+
+  async function doRollback(versionId: string) {
+    setRollingBack(versionId);
+    await onRollback(versionId);
+    setRollingBack(null);
+  }
+
+  return (
+    <div className="h-full overflow-y-auto">
+    <div className="max-w-2xl mx-auto pt-20 pb-10 px-6">
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Version History</h2>
+        <span className="text-xs text-zinc-400">{versions.length} version{versions.length !== 1 ? "s" : ""}</span>
+      </div>
+      {loading ? (
+        <div className="relative pl-6 space-y-3">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="flex items-center gap-4">
+              <div className="w-full h-12 rounded-xl bg-zinc-100 dark:bg-zinc-800 animate-pulse" />
+            </div>
+          ))}
+        </div>
+      ) : versions.length === 0 ? (
+        <p className="text-sm text-zinc-400">No published versions yet. Hit Publish to record a version.</p>
+      ) : (
+        <div className="relative pl-6">
+          {/* Timeline line */}
+          <div className="absolute left-[7px] top-2 bottom-2 w-px bg-zinc-200 dark:bg-zinc-700" />
+          <div className="space-y-3">
+            {versions.map((v) => {
+              const isCurrent = v.id === currentVersionId;
+              return (
+                <div key={v.id} className="relative flex items-center gap-4">
+                  {/* Timeline dot */}
+                  <div
+                    className={`absolute -left-6 w-3.5 h-3.5 rounded-full border-2 border-white dark:border-zinc-950 ${
+                      isCurrent
+                        ? isActive
+                          ? "bg-green-500"
+                          : "bg-blue-500"
+                        : "bg-zinc-300 dark:bg-zinc-600"
+                    }`}
+                  />
+                  {/* Card */}
+                  <div className={`flex-1 flex items-center justify-between px-4 py-3 rounded-xl border transition-colors ${
+                    isCurrent
+                      ? "border-blue-200 dark:border-blue-800 bg-blue-50/60 dark:bg-blue-950/40"
+                      : "border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900"
+                  }`}>
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-100 shrink-0">
+                        v{v.version_number}
+                      </span>
+                      <span className="text-xs text-zinc-400 truncate">
+                        Published {new Date(v.published_at ?? v.created_at).toLocaleString(undefined, {
+                          month: "short", day: "numeric", year: "numeric",
+                          hour: "2-digit", minute: "2-digit",
+                        })}
+                      </span>
+                    </div>
+                    <div className="shrink-0 ml-4 flex items-center gap-2">
+                      {isCurrent && isActive && (
+                        <span className="flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300">
+                          <span className="w-1.5 h-1.5 rounded-full bg-green-500 inline-block" />
+                          Live
+                        </span>
+                      )}
+                      {isCurrent && !isActive && (
+                        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300">
+                          Current
+                        </span>
+                      )}
+                      {!isCurrent && (
+                        <button
+                          onClick={() => doRollback(v.id)}
+                          disabled={rollingBack !== null}
+                          className="px-3 py-1 text-xs font-medium rounded-lg border border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {rollingBack === v.id ? "Rolling back…" : "Rollback"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
     </div>
   );
 }
@@ -379,9 +584,26 @@ function ExecutionsTab({
   };
 
   return (
+    <div className="h-full overflow-y-auto">
     <div className="max-w-2xl mx-auto pt-20 pb-10 px-6">
       {loading ? (
-        <p className="text-sm text-zinc-400">Loading…</p>
+        <div className="space-y-8">
+          {[0, 1].map((g) => (
+            <div key={g}>
+              <div className="flex items-center gap-3 mb-4">
+                <div className="h-3 w-28 rounded bg-zinc-100 dark:bg-zinc-800 animate-pulse" />
+                <div className="flex-1 h-px bg-zinc-100 dark:bg-zinc-800" />
+              </div>
+              <div className="pl-6 space-y-3">
+                {[0, 1, 2, 3].map((i) => (
+                  <div key={i} className="flex items-center gap-4">
+                    <div className="w-full h-10 rounded-xl bg-zinc-100 dark:bg-zinc-800 animate-pulse" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
       ) : executions.length === 0 ? (
         <p className="text-sm text-zinc-400">{emptyText}</p>
       ) : (
@@ -448,6 +670,7 @@ function ExecutionsTab({
           ))}
         </div>
       )}
+    </div>
     </div>
   );
 }

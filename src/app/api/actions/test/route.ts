@@ -1,6 +1,7 @@
 import { getAuthContext, verifyTeamMembership, jsonResponse, errorResponse } from "@/lib/api-utils";
 import { NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import * as jsonLogic from "json-logic-js";
 import {
   executeSlackSendMessage,
   executeGmailSendEmail,
@@ -9,6 +10,8 @@ import {
   executeLinearCreateIssue,
   executeLinearUpdateIssue,
   executeCalendlyCreateSchedulingLink,
+  executeSendGridSendEmail,
+  executeTwilioSendSms,
 } from "@/lib/integrations/actions";
 
 /** Test a single workflow action with the given inputs */
@@ -145,6 +148,23 @@ export async function POST(request: NextRequest) {
         });
         break;
       }
+      case "sendgrid_send_email": {
+        result = await executeSendGridSendEmail({
+          to: String(inputs.to ?? ""),
+          from: String(inputs.from ?? ""),
+          subject: String(inputs.subject ?? ""),
+          body: String(inputs.body ?? ""),
+        });
+        break;
+      }
+      case "twilio_send_sms": {
+        result = await executeTwilioSendSms({
+          to: String(inputs.to ?? ""),
+          from: String(inputs.from ?? ""),
+          message: String(inputs.message ?? ""),
+        });
+        break;
+      }
       case "logic_set_variables": {
         const raw = inputs.variables_json;
         if (!raw) {
@@ -193,6 +213,44 @@ export async function POST(request: NextRequest) {
         }
 
         result = parsed;
+        break;
+      }
+      case "builtin:if": {
+        const conditionStr = typeof inputs.condition === "string" ? inputs.condition.trim() : "";
+        if (!conditionStr) {
+          result = { result: true, note: "No condition set — defaults to true" };
+          break;
+        }
+
+        const vars = (inputs._vars ?? inputs.vars ?? {}) as Record<string, unknown>;
+
+        const transformRefs = (obj: unknown): unknown => {
+          if (typeof obj === "string") {
+            const m = obj.match(/^!ref\(\$\.(.+)\)$/);
+            if (m) return { var: m[1] };
+            return obj;
+          }
+          if (Array.isArray(obj)) return obj.map(transformRefs);
+          if (obj && typeof obj === "object") {
+            const out: Record<string, unknown> = {};
+            for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+              out[k] = transformRefs(v);
+            }
+            return out;
+          }
+          return obj;
+        };
+
+        let raw: unknown;
+        try {
+          raw = JSON.parse(conditionStr);
+        } catch {
+          return errorResponse(`Invalid condition JSON: ${conditionStr}`, 400);
+        }
+
+        const logic = transformRefs(raw) as Parameters<typeof jsonLogic.apply>[0];
+        const evalResult = jsonLogic.apply(logic, { vars });
+        result = { result: !!evalResult, vars, logic };
         break;
       }
       default:

@@ -5,10 +5,19 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import type { WorkflowExecution, ExecutionStep, WorkflowDefinition } from "@/types/workflow";
 
+type ExecutionLog = {
+  id: string;
+  level: "info" | "warn" | "error";
+  message: string;
+  data: Record<string, unknown> | null;
+  created_at: string;
+};
+
 export default function ExecutionDetailPage() {
   const params = useParams<{ id: string }>();
   const [execution, setExecution] = useState<WorkflowExecution | null>(null);
   const [steps, setSteps] = useState<ExecutionStep[]>([]);
+  const [logs, setLogs] = useState<ExecutionLog[]>([]);
   const [definition, setDefinition] = useState<WorkflowDefinition | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -18,9 +27,11 @@ export default function ExecutionDetailPage() {
         const res = await fetch(`/api/executions/${params.id}`);
         if (!res.ok) return;
         const data = await res.json();
-        setExecution(data.execution);
+        // The API spreads the execution record at the top level alongside steps/logs/version
+        setExecution(data as WorkflowExecution);
         setSteps(data.steps ?? []);
-        if (data.definition) setDefinition(data.definition);
+        setLogs(data.logs ?? []);
+        if (data.version?.definition) setDefinition(data.version.definition as WorkflowDefinition);
       } finally {
         setLoading(false);
       }
@@ -177,6 +188,43 @@ export default function ExecutionDetailPage() {
                     </div>
                   )}
                 </div>
+              </details>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Execution Logs */}
+      <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100 mb-3 mt-10">
+        Logs ({logs.length})
+      </h2>
+      {logs.length === 0 ? (
+        <p className="text-zinc-500 text-sm">No logs recorded yet.</p>
+      ) : (
+        <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden font-mono text-xs">
+          {logs.map((log) => {
+            const levelColor =
+              log.level === "error"
+                ? "text-red-500 bg-red-50 dark:bg-red-950/30"
+                : log.level === "warn"
+                ? "text-amber-600 bg-amber-50 dark:bg-amber-950/30"
+                : "text-zinc-700 dark:text-zinc-300 bg-white dark:bg-zinc-900";
+            return (
+              <details key={log.id} className={`border-b border-zinc-100 dark:border-zinc-800 last:border-b-0 ${levelColor}`}>
+                <summary className="flex items-center gap-3 px-3 py-1.5 cursor-pointer select-none hover:opacity-80">
+                  <span className="text-zinc-400 shrink-0 tabular-nums">
+                    {new Date(log.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                  </span>
+                  <span className={`uppercase font-bold text-[10px] w-10 shrink-0 ${log.level === "error" ? "text-red-500" : log.level === "warn" ? "text-amber-500" : "text-blue-400"}`}>
+                    {log.level}
+                  </span>
+                  <span className="truncate">{log.message}</span>
+                </summary>
+                {log.data && (
+                  <pre className="px-3 pb-2 pt-1 text-[11px] text-zinc-500 dark:text-zinc-400 overflow-x-auto border-t border-zinc-100 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/60">
+                    {JSON.stringify(log.data, null, 2)}
+                  </pre>
+                )}
               </details>
             );
           })}
